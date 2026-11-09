@@ -1,6 +1,6 @@
 # cubicle
 
-Interactive 3D renderer for your terminal. A CPU rasteriser that draws lit, spinning 3D models as ASCII art, coloured ASCII, or half-block truecolor. It also turns PNGs into ASCII. Works with keyboard, mouse and touch (Termux).
+Interactive 3D renderer for your terminal. A CPU rasteriser that draws lit, spinning 3D models as ASCII art, coloured ASCII, or half-block colour. It also turns PNGs into ASCII. Works with keyboard, mouse and touch (Termux).
 
 No GPU, no graphics libraries. Dependencies: `crossterm` (terminal I/O) and `png` (decoding).
 
@@ -27,8 +27,9 @@ cargo run --release -- -m blocks
 | Option | Meaning |
 | --- | --- |
 | `FILE` | `.obj` model or `.png` image (none: built-in cube) |
-| `-m, --mode ascii\|color\|blocks` | Plain ASCII (default), coloured ASCII, or half-block truecolor |
+| `-m, --mode ascii\|color\|blocks` | Plain ASCII (default), coloured ASCII, or half-block colour |
 | `-p, --palette natural\|green\|amber\|ice` | Colour palette for `color` / `blocks` |
+| `--colors auto\|truecolor\|256\|16` | Colour depth to emit. `auto` (default) reads `COLORTERM` / `TERM` |
 | `--flat` | Start with flat shading instead of smooth |
 | `--two-sided` | Draw back faces too (open meshes, planes) |
 | `--crease <deg>` | Smooth-shading crease angle, default 60 |
@@ -71,7 +72,7 @@ Samples in `models/`: `sphere.obj` (with normals), `torus.obj` (quads, no normal
 
 ## How it works
 
-Triangles are projected with perspective, rasterised with barycentric coordinates into a depth buffer (1/z), lit per pixel with a point light, and mapped to characters from `" .,:;-=+*#%@"`. Smooth shading interpolates per-corner normals (averaged across faces within the crease angle, so cube edges stay sharp and spheres go round). Half-block mode draws two square pixels per cell with `▀`/`▄` and truecolor foreground and background.
+Triangles are projected with perspective, rasterised with barycentric coordinates into a depth buffer (1/z), lit per pixel with a point light, and mapped to characters from `" .,:;-=+*#%@"`. Smooth shading interpolates per-corner normals (averaged across faces within the crease angle, so cube edges stay sharp and spheres go round). Half-block mode draws two square pixels per cell with `▀`/`▄` and foreground and background colours (24-bit, 256-colour or 16-colour, see `--colors`).
 
 For contributors and AI agents, see [`handout.md`](handout.md).
 
@@ -91,7 +92,7 @@ cargo fmt
 - [x] PNG to ASCII
 - [ ] Texture-mapping PNGs onto models (`vt` coordinates)
 - [ ] `.mtl` materials
-- [ ] 256-colour fallback for terminals without truecolor
+- [x] 256- and 16-colour fallback (`--colors`)
 
 ## License
 

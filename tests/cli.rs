@@ -104,3 +104,60 @@ fn malformed_obj_reports_the_line() {
     assert!(String::from_utf8_lossy(&o.stderr).contains("line 2"));
     let _ = std::fs::remove_file(dir);
 }
+
+#[test]
+fn colour_depth_controls_the_escape_format() {
+    let render =
+        |depth: &str, mode: &str| stdout(&["--once", "--size", "50x16", "--mode", mode, "--colors", depth]);
+    for mode in ["color", "blocks"] {
+        let t = render("truecolor", mode);
+        assert!(
+            t.contains(";2;") && !t.contains("38;5;") && !t.contains("48;5;"),
+            "{mode}"
+        );
+
+        let c256 = render("256", mode);
+        assert!(c256.contains("38;5;"), "{mode}: 256-colour foreground");
+        assert!(!c256.contains(";2;"), "{mode}: no truecolor escapes at 256");
+
+        let c16 = render("16", mode);
+        assert!(
+            !c16.contains(";2;") && !c16.contains(";5;"),
+            "{mode}: only basic colour codes at 16"
+        );
+        assert!(
+            c16.contains("\x1b[3") || c16.contains("\x1b[9"),
+            "{mode}: basic fg codes"
+        );
+    }
+}
+
+#[test]
+fn plain_ascii_is_unaffected_by_colour_depth() {
+    let a = stdout(&["--once", "--size", "40x12", "--colors", "16"]);
+    let b = stdout(&["--once", "--size", "40x12", "--colors", "truecolor"]);
+    assert_eq!(a, b);
+    assert!(!a.contains('\x1b'));
+}
+
+#[test]
+fn bad_colour_depth_is_a_usage_error() {
+    let o = run(&["--colors", "banana"]);
+    assert_eq!(o.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("unknown colour depth"));
+}
+
+#[test]
+fn images_honour_colour_depth() {
+    let out = stdout(&[
+        "examples/gradient.png",
+        "--once",
+        "--size",
+        "40x10",
+        "-m",
+        "blocks",
+        "--colors",
+        "256",
+    ]);
+    assert!(out.contains("48;5;") && !out.contains(";2;"));
+}

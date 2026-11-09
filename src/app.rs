@@ -1,7 +1,7 @@
 //! Interactive loops (3D model viewer, image viewer) and the one-shot renderer.
 
 use crate::cli::{Config, Input};
-use crate::display::{hud, hud_hit, Mode, Palette};
+use crate::display::{hud, hud_hit, ColorDepth, Mode, Palette};
 use crate::image::Image;
 use crate::mesh::Mesh;
 use crate::obj;
@@ -107,6 +107,7 @@ pub struct ModelView {
     pub auto: bool,
     pub mode: Mode,
     pub palette: Palette,
+    pub depth: ColorDepth,
     pub smooth: bool,
     pub two_sided: bool,
     drag_from: Option<(u16, u16)>,
@@ -131,6 +132,7 @@ impl ModelView {
             auto: cfg.auto,
             mode: cfg.mode,
             palette: cfg.palette,
+            depth: cfg.depth,
             smooth: cfg.smooth,
             two_sided: cfg.two_sided,
             drag_from: None,
@@ -269,7 +271,7 @@ impl ModelView {
         let ppr = self.mode.pixels_per_row();
         let mut frame = Frame::new(cols, rows * ppr);
         render(mesh, self.ax, self.ay, self.cam, self.opts(), &mut frame);
-        frame.canvas.encode(self.mode, self.palette)
+        frame.canvas.encode_with(self.mode, self.palette, self.depth)
     }
 }
 
@@ -326,6 +328,7 @@ fn run_model_loop(mesh: &Mesh, view: &mut ModelView) -> io::Result<()> {
 pub struct ImageView {
     pub mode: Mode,
     pub palette: Palette,
+    pub depth: ColorDepth,
     pub invert: bool,
 }
 
@@ -361,7 +364,7 @@ impl ImageView {
 
     pub fn frame_rows(&self, img: &Image, cols: usize, rows: usize) -> Vec<String> {
         img.to_canvas(cols, rows, self.mode.pixels_per_row(), self.invert)
-            .encode(self.mode, self.palette)
+            .encode_with(self.mode, self.palette, self.depth)
     }
 }
 
@@ -369,6 +372,7 @@ fn run_image(cfg: &Config, img: &Image) -> Result<(), String> {
     let mut view = ImageView {
         mode: cfg.mode,
         palette: cfg.palette,
+        depth: cfg.depth,
         invert: cfg.invert,
     };
     let _guard = TermGuard::new().map_err(|e| format!("cannot start terminal UI: {e}"))?;
@@ -427,7 +431,7 @@ pub fn render_once(cfg: &Config) -> Result<String, String> {
         Input::Png(p) => {
             let img = Image::load(p)?;
             img.to_canvas(w, h, cfg.mode.pixels_per_row(), cfg.invert)
-                .encode(cfg.mode, cfg.palette)
+                .encode_with(cfg.mode, cfg.palette, cfg.depth)
         }
         _ => {
             let mesh = load_mesh(cfg)?;

@@ -61,7 +61,7 @@ Because `base` is per-pixel rather than per-triangle, texture mapping needs no c
 - Triangles with any vertex nearer than z = 0.1 are dropped whole (no near-plane clipping). `CAM_MIN` (2.6) keeps normal models clear of this.
 
 **Colour**
-- Truecolor only (`ESC[38;2;r;g;bm` / `48;2`). `RowWriter` emits a colour escape only when it changes and resets at row end. Mono ASCII mode emits no escape codes at all.
+- Three colour depths (`display::ColorDepth`): truecolor (`ESC[38;2;r;g;bm` / `48;2`), xterm 256 (`38;5;n`), and 16 basic colours (`30-37`/`90-97`, `40-47`/`100-107`). `--colors auto` (the default) resolves via `ColorDepth::detect()`: `COLORTERM=truecolor|24bit`, `WT_SESSION`, known `TERM_PROGRAM`s and `TERM` names (kitty, alacritty, ...) give truecolor; `TERM` containing `256color` gives 256; any other `TERM` gives 16; no `TERM` at all (pipes, CI) keeps truecolor. `Config::default()` is always truecolor so unit tests don't depend on the environment; only `parse_args` calls `detect()`. `RowWriter` quantises through `Paint`, so it emits a colour escape only when the *quantised* colour changes (low depths shrink the stream a lot) and resets at row end. `rgb_to_16` is hue-based rather than nearest-colour, because nearest-colour sends every dim tint to grey. Mono ASCII mode emits no escape codes at all.
 - `Palette::apply` tints by luma (Natural = untouched). Shadows are lifted in block mode (`0.22 + 0.78·lum^0.7`) because the original lighting is harsh and unlit faces went nearly black.
 - The default render mode is still plain ASCII to preserve the v0.1.0 look and maximum terminal compatibility.
 
@@ -82,7 +82,7 @@ Because `base` is per-pixel rather than per-triangle, texture mapping needs no c
 ## 4. Testing
 
 ```sh
-cargo test                       # 45 unit tests + 8 end-to-end tests
+cargo test                       # 55 unit tests + 12 end-to-end tests
 cargo clippy --all-targets       # clean as of 1.75
 cargo fmt                        # rustfmt.toml: max_width = 110
 ```
@@ -106,7 +106,7 @@ These were judgement calls made without being able to ask. Confirm or overrule t
 
 1. **"PNG to ASCII" means an image viewer** (`cubicle pic.png`), not texturing a model. Texturing is listed as the next roadmap item. If the author meant texture mapping, §7 describes the approach.
 2. **Default mode stays plain ASCII**, and colour/blocks are opt-in. Switching the default to blocks would look better on modern terminals but changes v0.1.0 behaviour.
-3. **Truecolor is assumed** for colour modes (fine for Termux and modern desktop terminals). There is no 256-colour or 16-colour fallback, and no auto-detection via `COLORTERM`.
+3. **Colour depth is auto-detected** from the environment (see §3). A truecolor terminal that sets neither `COLORTERM` nor a recognisable `TERM` (some tmux/ssh setups) will be treated as 256-colour; `--colors truecolor` overrides. The detection rules are a best guess and have not been tried on real Termux, macOS Terminal or Windows Terminal.
 4. **Version bumped to 0.2.0** and a `[lib]` target added. Revert the bump if the author prefers to version differently.
 5. **Not verified on real Termux hardware or Windows.** Verified on Linux with a pty. CI config for Linux/macOS/Windows is included but has never run.
 6. **The README's old character ramp text was stale** (`" .:-=+*#%@"`); the code's actual ramp is `" .,:;-=+*#%@"`. The README now matches the code.
@@ -117,7 +117,7 @@ These were judgement calls made without being able to ask. Confirm or overrule t
 In rough priority order.
 
 1. **Texture mapping.** Parse `vt` into `RawTri`/`Triangle` as `uv: [[f32;2];3]`; carry it in `Prim`; in `Frame::fill` interpolate UVs with the *perspective-correct* weights already computed (`a0, a1, a2`, divide by their sum); sample an `Image` (add a `sample(u, v) -> [f32;3]` method with nearest/bilinear lookup) and write the result to `canvas.base[i]` instead of the triangle colour. `lit == true` then multiplies it by lighting, so no display changes are needed. Add `--texture FILE.png` and keep untextured behaviour as the default.
-2. **256-colour / 16-colour fallback** and `COLORTERM` detection in `display.rs`. The natural seam is `RowWriter` (it already owns all colour escapes) plus a new `ColorDepth` setting next to `Mode`.
+2. ~~256-colour / 16-colour fallback and `COLORTERM` detection~~ — done (`ColorDepth`, `--colors`).
 3. **`.mtl` support** (`Kd` diffuse colours via `mtllib`/`usemtl`) feeding the existing per-triangle `color`.
 4. **Near-plane clipping** so that zooming inside a model clips instead of dropping triangles.
 5. **Concave polygon triangulation** (ear clipping) in `obj.rs`.

@@ -1,6 +1,6 @@
 //! Command-line parsing (hand-rolled to keep the dependency list tiny).
 
-use crate::display::{Mode, Palette};
+use crate::display::{ColorDepth, Mode, Palette};
 use crate::mesh::DEFAULT_CREASE_DEG;
 use std::path::PathBuf;
 
@@ -19,6 +19,7 @@ OPTIONS:
     -m, --mode <ascii|color|blocks>      render mode (default: ascii)
     -p, --palette <natural|green|amber|ice>
                                          colour palette for color/blocks (default: natural)
+        --colors <auto|truecolor|256|16>  colour depth to emit (default: auto, from COLORTERM/TERM)
         --flat                           start with flat shading (models)
         --two-sided                      draw back faces too (models)
         --crease <DEG>                   smooth-shading crease angle (default: 60)
@@ -47,6 +48,8 @@ pub struct Config {
     pub input: Input,
     pub mode: Mode,
     pub palette: Palette,
+    /// Colour depth for the colour modes. Resolved from the environment unless `--colors` is given.
+    pub depth: ColorDepth,
     pub smooth: bool,
     pub two_sided: bool,
     pub auto: bool,
@@ -64,6 +67,7 @@ impl Default for Config {
             input: Input::Cube,
             mode: Mode::Ascii,
             palette: Palette::Natural,
+            depth: ColorDepth::TrueColor,
             smooth: true,
             two_sided: false,
             auto: true,
@@ -98,6 +102,7 @@ fn num(s: &str, flag: &str) -> Result<f32, String> {
 pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> {
     let mut cfg = Config::default();
     let mut file: Option<String> = None;
+    let mut depth: Option<ColorDepth> = None; // None = auto-detect
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
         // Allow --flag=value as well as --flag value.
@@ -121,6 +126,17 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, Str
                 let v = take(&mut it)?;
                 cfg.palette = Palette::parse(&v)
                     .ok_or_else(|| format!("unknown palette '{v}' (natural, green, amber, ice)"))?;
+            }
+            "--colors" | "--colours" => {
+                let v = take(&mut it)?;
+                depth =
+                    if v.eq_ignore_ascii_case("auto") {
+                        None
+                    } else {
+                        Some(ColorDepth::parse(&v).ok_or_else(|| {
+                            format!("unknown colour depth '{v}' (auto, truecolor, 256, 16)")
+                        })?)
+                    };
             }
             "--flat" => cfg.smooth = false,
             "--two-sided" => cfg.two_sided = true,
@@ -172,6 +188,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, Str
             _ => return Err(format!("'{f}': unsupported file type (expected .obj or .png)")),
         };
     }
+    cfg.depth = depth.unwrap_or_else(ColorDepth::detect);
     Ok(Parsed::Run(Box::new(cfg)))
 }
 
@@ -239,6 +256,20 @@ mod tests {
         assert!(parse(&["--rot", "1"]).is_err());
         assert!(parse(&["--crease", "400"]).is_err());
         assert!(parse(&["--bogus"]).unwrap_err().contains("unknown option"));
+    }
+
+    #[test]
+    fn colour_depth_option() {
+        assert_eq!(cfg(&["--colors", "256"]).depth, ColorDepth::Ansi256);
+        assert_eq!(cfg(&["--colors=16"]).depth, ColorDepth::Ansi16);
+        assert_eq!(cfg(&["--colours", "truecolor"]).depth, ColorDepth::TrueColor);
+        // `auto` (and no flag at all) resolve from the environment.
+        assert_eq!(cfg(&["--colors", "auto"]).depth, ColorDepth::detect());
+        assert_eq!(cfg(&[]).depth, ColorDepth::detect());
+        assert!(parse(&["--colors", "8"])
+            .unwrap_err()
+            .contains("unknown colour depth"));
+        assert!(parse(&["--colors"]).unwrap_err().contains("needs a value"));
     }
 
     #[test]
