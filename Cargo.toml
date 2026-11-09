@@ -25,3 +25,7 @@ png = "0.17"
 [profile.release]
 opt-level = 3
 lto = true
+
+# Pseudo-terminal smoke tests (tests/pty.rs). libc is already in the tree via crossterm.
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
