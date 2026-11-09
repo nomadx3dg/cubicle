@@ -1,5 +1,5 @@
 //! cubicle: a tiny CPU 3D rasteriser that draws to the terminal as ASCII.
-//! Keyboard, mouse and touch (Termux) controls. Milestone 1: a spinning, lit cube.
+//! Keyboard, mouse and touch (Termux) controls.
 
 use crossterm::{
     cursor,
@@ -9,11 +9,16 @@ use crossterm::{
     },
     execute, terminal,
 };
+use std::fmt::Write as _;
 use std::io::{self, Write};
 use std::time::{Duration, Instant};
 
 // Dark -> bright. Add or swap characters to change the look.
-const RAMP: &[u8] = b" .:-=+*#%@";
+const RAMP: &[u8] = b" .,:;-=+*#%@";
+
+const STEP: f32 = 0.6; // radians per tap
+const CAM_MIN: f32 = 2.6;
+const CAM_MAX: f32 = 20.0;
 
 #[derive(Clone, Copy)]
 struct V3 {
@@ -26,8 +31,14 @@ impl V3 {
     const fn new(x: f32, y: f32, z: f32) -> Self {
         V3 { x, y, z }
     }
+    fn add(self, o: V3) -> V3 {
+        V3::new(self.x + o.x, self.y + o.y, self.z + o.z)
+    }
     fn sub(self, o: V3) -> V3 {
         V3::new(self.x - o.x, self.y - o.y, self.z - o.z)
+    }
+    fn scale(self, k: f32) -> V3 {
+        V3::new(self.x * k, self.y * k, self.z * k)
     }
     fn dot(self, o: V3) -> f32 {
         self.x * o.x + self.y * o.y + self.z * o.z
@@ -44,7 +55,7 @@ impl V3 {
         if l == 0.0 {
             self
         } else {
-            V3::new(self.x / l, self.y / l, self.z / l)
+            self.scale(1.0 / l)
         }
     }
     fn rot_x(self, a: f32) -> V3 {
@@ -93,11 +104,7 @@ fn cube() -> Vec<Tri> {
 /// (Fine for the cube. For .obj models you'll want proper winding instead.)
 fn orient_outward(t: Tri) -> Tri {
     let n = t[1].sub(t[0]).cross(t[2].sub(t[0]));
-    let centroid = V3::new(
-        (t[0].x + t[1].x + t[2].x) / 3.0,
-        (t[0].y + t[1].y + t[2].y) / 3.0,
-        (t[0].z + t[1].z + t[2].z) / 3.0,
-    );
+    let centroid = t[0].add(t[1]).add(t[2]).scale(1.0 / 3.0);
     if n.dot(centroid) < 0.0 {
         [t[0], t[2], t[1]]
     } else {
@@ -122,7 +129,9 @@ impl Frame {
         }
     }
 
-    fn triangle(&mut self, p: [(f32, f32); 3], inv_z: [f32; 3], brightness: f32) {
+    /// Rasterise one triangle. `view` are the vertices in camera space, `n` the face
+    /// normal. Lighting is a point light, evaluated per pixel for smooth gradients.
+    fn triangle(&mut self, p: [(f32, f32); 3], inv_z: [f32; 3], view: [V3; 3], n: V3, light: V3) {
         let edge = |a: (f32, f32), b: (f32, f32), c: (f32, f32)| {
             (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0)
         };
@@ -130,56 +139,78 @@ impl Frame {
         if area.abs() < 1e-6 {
             return;
         }
-        let min_x = p.iter().map(|q| q.0).fold(f32::MAX, f32::min).floor().max(0.0) as usize;
+        let min_x = p.iter().map(|q| q.0).fold(f32::MAX, f32::min).floor().max(0.0);
         let max_x = p.iter().map(|q| q.0).fold(f32::MIN, f32::max).ceil().min(self.w as f32 - 1.0);
-        let min_y = p.iter().map(|q| q.1).fold(f32::MAX, f32::min).floor().max(0.0) as usize;
+        let min_y = p.iter().map(|q| q.1).fold(f32::MAX, f32::min).floor().max(0.0);
         let max_y = p.iter().map(|q| q.1).fold(f32::MIN, f32::max).ceil().min(self.h as f32 - 1.0);
-        if max_x < 0.0 || max_y < 0.0 {
+        if max_x < min_x || max_y < min_y {
             return;
         }
-        for y in min_y..=(max_y as usize) {
-            for x in min_x..=(max_x as usize) {
+        const EPS: f32 = -1e-4; // tolerance so shared edges never leave holes
+        for y in (min_y as usize)..=(max_y as usize) {
+            for x in (min_x as usize)..=(max_x as usize) {
                 let pt = (x as f32 + 0.5, y as f32 + 0.5);
                 let w0 = edge(p[1], p[2], pt) / area;
                 let w1 = edge(p[2], p[0], pt) / area;
                 let w2 = edge(p[0], p[1], pt) / area;
-                if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
+                if w0 < EPS || w1 < EPS || w2 < EPS {
                     continue;
                 }
                 let z = w0 * inv_z[0] + w1 * inv_z[1] + w2 * inv_z[2];
                 let i = y * self.w + x;
-                if z > self.depth[i] {
-                    self.depth[i] = z;
-                    self.shade[i] = brightness;
+                if z <= self.depth[i] {
+                    continue;
                 }
+                self.depth[i] = z;
+                // Perspective-correct position of this pixel in camera space.
+                let (a0, a1, a2) = (w0 * inv_z[0], w1 * inv_z[1], w2 * inv_z[2]);
+                let pos = view[0]
+                    .scale(a0)
+                    .add(view[1].scale(a1))
+                    .add(view[2].scale(a2))
+                    .scale(1.0 / (a0 + a1 + a2));
+                let to_light = light.sub(pos);
+                let d2 = to_light.dot(to_light);
+                let diff = n.dot(to_light.normalize()).max(0.0);
+                let atten = 1.0 / (1.0 + 0.06 * d2);
+                self.shade[i] = (0.08 + 1.9 * diff * atten).min(1.0);
             }
         }
     }
 
-    fn to_ascii(&self, out: &mut String) {
-        for row in self.shade.chunks(self.w) {
-            for &b in row {
-                let c = if b < 0.0 {
-                    ' '
-                } else {
-                    RAMP[(b.clamp(0.0, 1.0) * (RAMP.len() - 1) as f32) as usize] as char
-                };
-                out.push(c);
-            }
-            out.push_str("\r\n");
-        }
+    fn rows(&self) -> Vec<String> {
+        self.shade
+            .chunks(self.w)
+            .map(|row| {
+                row.iter()
+                    .map(|&b| {
+                        if b < 0.0 {
+                            ' '
+                        } else {
+                            RAMP[(b.clamp(0.0, 1.0) * (RAMP.len() - 1) as f32 + 0.5) as usize]
+                                as char
+                        }
+                    })
+                    .collect()
+            })
+            .collect()
     }
 }
 
 /// Draws the mesh into the frame. `cam` is the camera distance on the -z axis.
 fn render(mesh: &[Tri], ax: f32, ay: f32, cam: f32, frame: &mut Frame) {
-    let light = V3::new(0.4, 0.7, -0.6).normalize();
     let eye = V3::new(0.0, 0.0, -cam);
-    let focal = frame.h as f32 * 1.1;
+    let light = V3::new(2.5, 3.0, -cam + 0.5);
+    // Size the cube so it fits both tall and wide screens. Cells are ~2x taller than wide.
+    let focal = (frame.h as f32 * 1.1).min(frame.w as f32 * 0.65) * cam / 5.0;
     let (cx, cy) = (frame.w as f32 / 2.0, frame.h as f32 / 2.0);
 
     for tri in mesh {
-        let t: Vec<V3> = tri.iter().map(|v| v.rot_y(ay).rot_x(ax)).collect();
+        let t = [
+            tri[0].rot_y(ay).rot_x(ax),
+            tri[1].rot_y(ay).rot_x(ax),
+            tri[2].rot_y(ay).rot_x(ax),
+        ];
         let n = t[1].sub(t[0]).cross(t[2].sub(t[0])).normalize();
         // Backface culling: skip faces pointing away from the camera.
         if n.dot(eye.sub(t[0])) <= 0.0 {
@@ -187,6 +218,7 @@ fn render(mesh: &[Tri], ax: f32, ay: f32, cam: f32, frame: &mut Frame) {
         }
         let mut pts = [(0.0, 0.0); 3];
         let mut inv_z = [0.0; 3];
+        let mut view = [V3::new(0.0, 0.0, 0.0); 3];
         let mut behind = false;
         for (i, v) in t.iter().enumerate() {
             let z = v.z + cam;
@@ -194,30 +226,21 @@ fn render(mesh: &[Tri], ax: f32, ay: f32, cam: f32, frame: &mut Frame) {
                 behind = true;
                 break;
             }
-            // Terminal cells are about twice as tall as wide, so stretch x by 2.
             pts[i] = (cx + v.x * focal / z * 2.0, cy - v.y * focal / z);
             inv_z[i] = 1.0 / z;
+            view[i] = *v;
         }
         if behind {
             continue;
         }
-        let brightness = 0.1 + 0.9 * n.dot(light).max(0.0);
-        frame.triangle(pts, inv_z, brightness);
+        frame.triangle(pts, inv_z, view, n, light);
     }
 }
 
-const TAP_KICK: f32 = 2.0; // rad/s given by a tap, decays quickly
-const CAM_MIN: f32 = 2.6;
-const CAM_MAX: f32 = 20.0;
-
-/// Bottom bar with three touch buttons: zoom out, pause/play, zoom in.
-fn hud(w: usize, paused: bool, fps: f32) -> String {
+/// Bottom bar with three touch buttons: zoom out, auto-spin, zoom in.
+fn hud(w: usize, auto: bool) -> String {
     let third = w / 3;
-    let mid = if paused {
-        "play".to_string()
-    } else {
-        format!("pause {:.0}fps", fps)
-    };
+    let mid = if auto { "auto: on" } else { "auto: off" };
     let cell = |s: &str, width: usize| {
         let s: String = s.chars().take(width).collect();
         let pad = width - s.chars().count();
@@ -227,7 +250,7 @@ fn hud(w: usize, paused: bool, fps: f32) -> String {
     format!(
         "{}{}{}",
         cell("[ - ]", third),
-        cell(&mid, w - 2 * third),
+        cell(mid, w - 2 * third),
         cell("[ + ]", third)
     )
 }
@@ -244,12 +267,16 @@ impl TermGuard {
             EnableMouseCapture,
             cursor::Hide
         )?;
+        // Disable line wrap so drawing the last cell never scrolls the screen.
+        print!("\x1b[?7l");
+        io::stdout().flush()?;
         Ok(TermGuard)
     }
 }
 
 impl Drop for TermGuard {
     fn drop(&mut self) {
+        print!("\x1b[?7h");
         let _ = execute!(
             io::stdout(),
             cursor::Show,
@@ -263,99 +290,135 @@ impl Drop for TermGuard {
 fn main() -> io::Result<()> {
     let _guard = TermGuard::new()?;
     let mesh = cube();
-    let (mut ax, mut ay, mut cam) = (0.4_f32, 0.0_f32, 5.0_f32);
-    let (mut vx, mut vy) = (0.0_f32, 0.0_f32); // extra spin from taps
+    let (mut tax, mut tay) = (0.4_f32, 0.6_f32); // target angles (input changes these)
+    let (mut ax, mut ay) = (tax, tay); // shown angles (ease toward targets)
+    let mut cam = 5.0_f32;
+    let mut auto = true;
     let mut drag_from: Option<(u16, u16)> = None;
-    let mut paused = false;
+    let mut prev: Vec<String> = Vec::new();
+    let mut last_size = (0u16, 0u16);
     let mut out = String::new();
     let mut last = Instant::now();
-    let mut fps = 30.0_f32;
     let frame_time = Duration::from_millis(33);
 
     loop {
         let start = Instant::now();
-        let dt = start.duration_since(last).as_secs_f32().max(0.0001);
+        let dt = start.duration_since(last).as_secs_f32().clamp(0.0001, 0.1);
         last = start;
-        if dt > 0.005 {
-            fps = fps * 0.9 + (1.0 / dt) * 0.1;
-        }
         let (tw, th) = terminal::size()?;
 
         while event::poll(Duration::from_millis(0))? {
             match event::read()? {
                 Event::Key(k) if k.kind == KeyEventKind::Press => match k.code {
                     KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-                    KeyCode::Left => ay -= 0.1,
-                    KeyCode::Right => ay += 0.1,
-                    KeyCode::Up => ax -= 0.1,
-                    KeyCode::Down => ax += 0.1,
+                    KeyCode::Left => tay += STEP / 2.0,
+                    KeyCode::Right => tay -= STEP / 2.0,
+                    KeyCode::Up => tax += STEP / 2.0,
+                    KeyCode::Down => tax -= STEP / 2.0,
                     KeyCode::Char('+') | KeyCode::Char('=') => cam = (cam - 0.3).max(CAM_MIN),
                     KeyCode::Char('-') => cam = (cam + 0.3).min(CAM_MAX),
-                    KeyCode::Char(' ') => paused = !paused,
+                    KeyCode::Char(' ') => auto = !auto,
                     _ => {}
                 },
-                // Touch (Termux) and mouse. A tap arrives as a left click and a
-                // vertical swipe arrives as the scroll wheel.
+                // Touch (Termux) and mouse. A tap arrives as a left click and an
+                // up/down swipe arrives as the scroll wheel. Termux does not report
+                // sideways finger movement, so sideways turning is done with taps.
                 Event::Mouse(m) => match m.kind {
                     MouseEventKind::Down(MouseButton::Left) => {
                         if m.row + 1 >= th {
-                            // Bottom bar: [ - ] [ pause ] [ + ]
+                            // Bottom bar: [ - ] [ auto ] [ + ]
                             let third = tw / 3;
                             if m.column < third {
                                 cam = (cam + 0.6).min(CAM_MAX);
                             } else if m.column >= tw - third {
                                 cam = (cam - 0.6).max(CAM_MIN);
                             } else {
-                                paused = !paused;
+                                auto = !auto;
                             }
                             drag_from = None;
                         } else {
-                            // Tap the screen: center = pause, edges = spin that way.
-                            let nx = (m.column as f32 - tw as f32 / 2.0) / (tw as f32 / 2.0);
-                            let ny = (m.row as f32 - th as f32 / 2.0) / (th as f32 / 2.0);
-                            if nx.abs() < 0.25 && ny.abs() < 0.25 {
-                                paused = !paused;
-                            } else if nx.abs() > ny.abs() {
-                                vy += nx.signum() * TAP_KICK;
+                            // Tap the side you want the cube to turn toward.
+                            let nx = (m.column as f32 + 0.5 - tw as f32 / 2.0) / (tw as f32 / 2.0);
+                            let ny = (m.row as f32 + 0.5 - th as f32 / 2.0) / (th as f32 / 2.0);
+                            if nx.abs() < 0.2 && ny.abs() < 0.2 {
+                                auto = !auto;
                             } else {
-                                vx += ny.signum() * TAP_KICK;
+                                auto = false;
+                                if nx.abs() >= ny.abs() {
+                                    tay -= nx.signum() * STEP;
+                                } else {
+                                    tax -= ny.signum() * STEP;
+                                }
                             }
                             drag_from = Some((m.column, m.row));
                         }
                     }
+                    // Real mouse drag (not sent by Termux touch).
                     MouseEventKind::Drag(MouseButton::Left) => {
                         if let Some((c, r)) = drag_from {
-                            ay += (m.column as f32 - c as f32) * 0.06;
-                            ax += (m.row as f32 - r as f32) * 0.1;
+                            auto = false;
+                            tay -= (m.column as f32 - c as f32) * 0.08;
+                            tax -= (m.row as f32 - r as f32) * 0.12;
                             drag_from = Some((m.column, m.row));
                         }
                     }
                     MouseEventKind::Up(_) => drag_from = None,
-                    MouseEventKind::ScrollUp => cam = (cam - 0.3).max(CAM_MIN),
-                    MouseEventKind::ScrollDown => cam = (cam + 0.3).min(CAM_MAX),
+                    // Swipe the cube up or down.
+                    MouseEventKind::ScrollDown => {
+                        auto = false;
+                        tax += STEP / 3.0;
+                    }
+                    MouseEventKind::ScrollUp => {
+                        auto = false;
+                        tax -= STEP / 3.0;
+                    }
                     _ => {}
                 },
                 _ => {}
             }
         }
 
-        let spin = if paused { 0.0 } else { 1.0 };
-        ay += dt * (0.8 * spin + vy);
-        ax += dt * (0.5 * spin + vx);
-        let decay = (-3.0 * dt).exp();
-        vx *= decay;
-        vy *= decay;
+        if auto {
+            tay += dt * 0.8;
+            tax += dt * 0.35;
+        }
+        // Ease the shown angles toward the targets so taps glide instead of jumping.
+        let ease = 1.0 - (-14.0 * dt).exp();
+        ax += (tax - ax) * ease;
+        ay += (tay - ay) * ease;
+        for (t, a) in [(&mut tax, &mut ax), (&mut tay, &mut ay)] {
+            if *t > std::f32::consts::TAU {
+                *t -= std::f32::consts::TAU;
+                *a -= std::f32::consts::TAU;
+            } else if *t < -std::f32::consts::TAU {
+                *t += std::f32::consts::TAU;
+                *a += std::f32::consts::TAU;
+            }
+        }
 
         let (w, h) = (tw as usize, (th as usize).saturating_sub(1).max(1));
         let mut frame = Frame::new(w, h);
         render(&mesh, ax, ay, cam, &mut frame);
+        let mut rows = frame.rows();
+        rows.push(hud(w, auto));
 
+        // Only redraw rows that changed, inside a synchronized update (no flicker/tearing).
         out.clear();
-        frame.to_ascii(&mut out);
-        out.push_str(&hud(w, paused, fps));
+        out.push_str("\x1b[?2026h");
+        if (tw, th) != last_size {
+            out.push_str("\x1b[2J");
+            prev.clear();
+            last_size = (tw, th);
+        }
+        for (i, row) in rows.iter().enumerate() {
+            if prev.get(i) != Some(row) {
+                let _ = write!(out, "\x1b[{};1H{}", i + 1, row);
+            }
+        }
+        out.push_str("\x1b[?2026l");
+        prev = rows;
 
         let mut stdout = io::stdout().lock();
-        execute!(stdout, cursor::MoveTo(0, 0))?;
         stdout.write_all(out.as_bytes())?;
         stdout.flush()?;
         drop(stdout);

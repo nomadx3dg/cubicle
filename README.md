@@ -21,19 +21,21 @@ cargo run --release
 
 | Input | Action |
 | --- | --- |
-| Tap left/right/top/bottom of the screen | Spin that way |
-| Tap the center | Pause / play |
-| Drag | Rotate |
-| Swipe up / down | Zoom in / out |
-| Bottom bar `[ - ]` `[ pause ]` `[ + ]` | Zoom out, pause, zoom in |
-| Arrow keys | Rotate |
+| Tap the left / right / top / bottom of the screen | Turn the cube that way |
+| Tap the center | Auto-spin on / off |
+| Swipe up / down | Tilt the cube |
+| Bottom bar `[ - ]` `[ auto ]` `[ + ]` | Zoom out, auto-spin, zoom in |
+| Arrow keys | Turn the cube |
 | `+` / `-` | Zoom |
-| Space | Pause |
+| Space | Auto-spin on / off |
+| Mouse drag | Rotate (desktop terminals) |
 | `q` / Esc | Quit |
+
+Termux reports taps and up/down swipes to programs but not sideways finger movement, so touch turning is tap-based.
 
 ## How it works
 
-Triangles are projected with perspective, rasterised with barycentric coordinates into a depth buffer (1/z), shaded per face with a directional light, and mapped to characters from `" .:-=+*#%@"`. No GPU, no graphics libraries. The only dependency is `crossterm` for terminal I/O.
+Triangles are projected with perspective, rasterised with barycentric coordinates into a depth buffer (1/z), lit per pixel with a point light, and mapped to characters from `" .:-=+*#%@"`. No GPU, no graphics libraries. The only dependency is `crossterm` for terminal I/O.
 
 ## Roadmap
 
