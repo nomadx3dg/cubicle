@@ -5,7 +5,7 @@ use crate::display::{hud, hud_hit, ColorDepth, Mode, Palette};
 use crate::image::Image;
 use crate::mesh::Mesh;
 use crate::obj;
-use crate::raster::{render, Frame, RenderOpts};
+use crate::raster::{render_textured, Frame, RenderOpts};
 use crossterm::{
     cursor,
     event::{
@@ -110,6 +110,9 @@ pub struct ModelView {
     pub depth: ColorDepth,
     pub smooth: bool,
     pub two_sided: bool,
+    /// Texture for models with `vt` coordinates, and whether it is shown.
+    pub texture: Option<Image>,
+    pub tex_on: bool,
     drag_from: Option<(u16, u16)>,
     start: (f32, f32),
 }
@@ -135,6 +138,8 @@ impl ModelView {
             depth: cfg.depth,
             smooth: cfg.smooth,
             two_sided: cfg.two_sided,
+            texture: None,
+            tex_on: true,
             drag_from: None,
             start: (ax, ay),
         }
@@ -161,6 +166,7 @@ impl ModelView {
             KeyCode::Char('c') => self.palette = self.palette.next(),
             KeyCode::Char('s') => self.smooth = !self.smooth,
             KeyCode::Char('b') => self.two_sided = !self.two_sided,
+            KeyCode::Char('t') if self.texture.is_some() => self.tex_on = !self.tex_on,
             KeyCode::Char('r') => {
                 self.tax = self.start.0;
                 self.tay = self.start.1;
@@ -270,7 +276,8 @@ impl ModelView {
     pub fn frame_rows(&self, mesh: &Mesh, cols: usize, rows: usize) -> Vec<String> {
         let ppr = self.mode.pixels_per_row();
         let mut frame = Frame::new(cols, rows * ppr);
-        render(mesh, self.ax, self.ay, self.cam, self.opts(), &mut frame);
+        let tex = if self.tex_on { self.texture.as_ref() } else { None };
+        render_textured(mesh, self.ax, self.ay, self.cam, self.opts(), tex, &mut frame);
         frame.canvas.encode_with(self.mode, self.palette, self.depth)
     }
 }
@@ -282,9 +289,18 @@ fn load_mesh(cfg: &Config) -> Result<Mesh, String> {
     }
 }
 
+/// Builds the model view, loading `--texture` if given.
+fn build_view(cfg: &Config) -> Result<ModelView, String> {
+    let mut view = ModelView::new(cfg);
+    if let Some(p) = &cfg.texture {
+        view.texture = Some(Image::load(p)?);
+    }
+    Ok(view)
+}
+
 fn run_model(cfg: &Config) -> Result<(), String> {
     let mesh = load_mesh(cfg)?;
-    let mut view = ModelView::new(cfg);
+    let mut view = build_view(cfg)?;
     let _guard = TermGuard::new().map_err(|e| format!("cannot start terminal UI: {e}"))?;
     run_model_loop(&mesh, &mut view).map_err(|e| e.to_string())
 }
@@ -435,7 +451,7 @@ pub fn render_once(cfg: &Config) -> Result<String, String> {
         }
         _ => {
             let mesh = load_mesh(cfg)?;
-            ModelView::new(cfg).frame_rows(&mesh, w, h)
+            build_view(cfg)?.frame_rows(&mesh, w, h)
         }
     };
     let mut s = rows.join("\n");
@@ -549,6 +565,20 @@ mod tests {
             assert_eq!(text.lines().count(), 12);
             assert!(text.trim().len() > 20);
         }
+    }
+
+    #[test]
+    fn texture_toggle_only_works_with_a_texture() {
+        let mut v = view();
+        v.on_key(KeyCode::Char('t'));
+        assert!(v.tex_on, "no texture loaded: 't' does nothing");
+        v.texture = Some(Image {
+            w: 1,
+            h: 1,
+            rgb: vec![[0, 0, 0]],
+        });
+        v.on_key(KeyCode::Char('t'));
+        assert!(!v.tex_on);
     }
 
     #[test]

@@ -20,6 +20,8 @@ OPTIONS:
     -p, --palette <natural|green|amber|ice>
                                          colour palette for color/blocks (default: natural)
         --colors <auto|truecolor|256|16>  colour depth to emit (default: auto, from COLORTERM/TERM)
+        --texture <FILE.png>             texture-map a PNG onto the model (uses the model's vt coordinates;
+                                         the built-in cube has them too)
         --flat                           start with flat shading (models)
         --two-sided                      draw back faces too (models)
         --crease <DEG>                   smooth-shading crease angle (default: 60)
@@ -33,7 +35,7 @@ OPTIONS:
 
 KEYS (interactive):
     arrows turn   +/- zoom   space auto-spin   m mode   c palette
-    s smooth/flat   b two-sided   i invert (images)   r reset view   q/Esc quit
+    s smooth/flat   b two-sided   t texture on/off   i invert (images)   r reset view   q/Esc quit
 ";
 
 #[derive(Clone, Debug, PartialEq)]
@@ -50,6 +52,8 @@ pub struct Config {
     pub palette: Palette,
     /// Colour depth for the colour modes. Resolved from the environment unless `--colors` is given.
     pub depth: ColorDepth,
+    /// PNG to map onto the model, if any.
+    pub texture: Option<PathBuf>,
     pub smooth: bool,
     pub two_sided: bool,
     pub auto: bool,
@@ -68,6 +72,7 @@ impl Default for Config {
             mode: Mode::Ascii,
             palette: Palette::Natural,
             depth: ColorDepth::TrueColor,
+            texture: None,
             smooth: true,
             two_sided: false,
             auto: true,
@@ -138,6 +143,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, Str
                         })?)
                     };
             }
+            "--texture" => cfg.texture = Some(take(&mut it)?.into()),
             "--flat" => cfg.smooth = false,
             "--two-sided" => cfg.two_sided = true,
             "--no-auto" => cfg.auto = false,
@@ -189,6 +195,9 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, Str
         };
     }
     cfg.depth = depth.unwrap_or_else(ColorDepth::detect);
+    if cfg.texture.is_some() && matches!(cfg.input, Input::Png(_)) {
+        return Err("--texture applies to 3D models, not to a PNG being viewed".into());
+    }
     Ok(Parsed::Run(Box::new(cfg)))
 }
 
@@ -270,6 +279,15 @@ mod tests {
             .unwrap_err()
             .contains("unknown colour depth"));
         assert!(parse(&["--colors"]).unwrap_err().contains("needs a value"));
+    }
+
+    #[test]
+    fn texture_option() {
+        let c = cfg(&["--texture", "t.png", "m.obj"]);
+        assert_eq!(c.texture, Some("t.png".into()));
+        assert_eq!(cfg(&["--texture=t.png"]).texture, Some("t.png".into()));
+        assert!(parse(&["--texture"]).is_err());
+        assert!(parse(&["--texture", "t.png", "pic.png"]).is_err());
     }
 
     #[test]

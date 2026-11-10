@@ -220,3 +220,24 @@ fn image_viewer_responds_to_keys_and_quits_cleanly() {
     s.send("q");
     s.assert_clean_exit();
 }
+
+#[test]
+fn textured_model_survives_the_texture_toggle() {
+    let mut s = Session::start(&[
+        "--texture",
+        "examples/checker.png",
+        "-m",
+        "blocks",
+        "--colors",
+        "truecolor",
+    ]);
+    s.wait_for("mode: blocks");
+    s.wait_for("\u{2580}");
+    // 't' switches the texture off and on again; the viewer must keep running.
+    s.send("t");
+    s.send("t");
+    s.send(" ");
+    s.wait_for("auto: off");
+    s.send("q");
+    s.assert_clean_exit();
+}

@@ -20,6 +20,8 @@ pub struct Triangle {
     pub n: [V3; 3],
     /// Linear RGB in 0..1, multiplied by the lighting when drawn in colour.
     pub color: [f32; 3],
+    /// Per-corner texture coordinates (`u`, `v`; `v` = 0 is the bottom edge), if known.
+    pub uv: Option<[[f32; 2]; 3]>,
 }
 
 /// Un-normalised input triangle, as produced by loaders.
@@ -29,6 +31,8 @@ pub struct RawTri {
     /// Normals supplied by the file (`vn`), if all three corners had one.
     pub n: Option<[V3; 3]>,
     pub color: [f32; 3],
+    /// Texture coordinates supplied by the file (`vt`), if all three corners had one.
+    pub uv: Option<[[f32; 2]; 3]>,
 }
 
 impl RawTri {
@@ -37,6 +41,7 @@ impl RawTri {
             v,
             n: None,
             color: DEFAULT_COLOR,
+            uv: None,
         }
     }
 }
@@ -95,6 +100,9 @@ impl Mesh {
                 if let Some(n) = &mut t.n {
                     n.swap(1, 2);
                 }
+                if let Some(uv) = &mut t.uv {
+                    uv.swap(1, 2);
+                }
             }
         }
 
@@ -109,6 +117,7 @@ impl Mesh {
                     None => auto,
                 },
                 color: t.color,
+                uv: t.uv,
             })
             .collect();
         Ok(Mesh { tris })
@@ -137,28 +146,32 @@ impl Mesh {
         ];
         let mut raw = Vec::new();
         for (q, color) in quads {
-            for t in [[q[0], q[1], q[2]], [q[0], q[2], q[3]]] {
-                let tri = orient_outward([v[t[0]], v[t[1]], v[t[2]]]);
+            // Texture coordinates run around the perimeter. If the perimeter winds
+            // clockwise seen from outside, the image would be mirrored, so flip u.
+            let face_n = raw_cross(&[v[q[0]], v[q[1]], v[q[2]]]);
+            let mirrored = face_n.dot(v[q[0]].add(v[q[2]]).scale(0.5)) < 0.0;
+            let corner_uv = |k: usize| {
+                let u = [0.0, 1.0, 1.0, 0.0][k];
+                [if mirrored { 1.0 - u } else { u }, [0.0, 0.0, 1.0, 1.0][k]]
+            };
+            for t in [[0, 1, 2], [0, 2, 3]] {
+                let mut c = t.map(|k| (v[q[k]], corner_uv(k)));
+                // Flip any triangle whose normal faces inward (swap two corners).
+                let n = raw_cross(&[c[0].0, c[1].0, c[2].0]);
+                let centroid = c[0].0.add(c[1].0).add(c[2].0).scale(1.0 / 3.0);
+                if n.dot(centroid) < 0.0 {
+                    c.swap(1, 2);
+                }
                 raw.push(RawTri {
-                    v: tri,
+                    v: [c[0].0, c[1].0, c[2].0],
                     n: None,
                     color,
+                    uv: Some([c[0].1, c[1].1, c[2].1]),
                 });
             }
         }
         // Already centred with the right radius; from_raw leaves it unchanged.
         Mesh::from_raw(raw, DEFAULT_CREASE_DEG).expect("cube is valid")
-    }
-}
-
-/// For a mesh centred on the origin, flip any triangle whose normal faces inward.
-fn orient_outward(t: [V3; 3]) -> [V3; 3] {
-    let n = raw_cross(&t);
-    let centroid = t[0].add(t[1]).add(t[2]).scale(1.0 / 3.0);
-    if n.dot(centroid) < 0.0 {
-        [t[0], t[2], t[1]]
-    } else {
-        t
     }
 }
 

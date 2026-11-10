@@ -11,6 +11,7 @@ cargo run --release                         # the built-in cube
 cargo run --release -- models/torus.obj     # any Wavefront .obj
 cargo run --release -- -m blocks -p amber models/sphere.obj
 cargo run --release -- examples/gradient.png
+cargo run --release -- --texture examples/checker.png -m blocks models/sphere.obj
 ```
 
 ### Termux (Android)
@@ -30,6 +31,7 @@ cargo run --release -- -m blocks
 | `-m, --mode ascii\|color\|blocks` | Plain ASCII (default), coloured ASCII, or half-block colour |
 | `-p, --palette natural\|green\|amber\|ice` | Colour palette for `color` / `blocks` |
 | `--colors auto\|truecolor\|256\|16` | Colour depth to emit. `auto` (default) reads `COLORTERM` / `TERM` |
+| `--texture FILE.png` | Map a PNG onto the model using its `vt` coordinates (the built-in cube and `models/sphere.obj` have them) |
 | `--flat` | Start with flat shading instead of smooth |
 | `--two-sided` | Draw back faces too (open meshes, planes) |
 | `--crease <deg>` | Smooth-shading crease angle, default 60 |
@@ -56,6 +58,7 @@ cargo run --release -- -m blocks
 | `c` | Cycle palette |
 | `s` | Smooth / flat shading |
 | `b` | Two-sided / back-face culling |
+| `t` | Texture on / off (when `--texture` is given) |
 | `r` | Reset view |
 | Mouse drag | Rotate (desktop terminals) |
 | `q` / Esc | Quit |
@@ -66,9 +69,9 @@ Termux reports taps and up/down swipes to programs but not sideways finger movem
 
 ## Models
 
-OBJ support: `v` (with optional `r g b` vertex colours), `vn`, and `f` in every index form (`v`, `v/vt`, `v//vn`, `v/vt/vn`) with negative indices. Polygons are fan-triangulated, so they must be convex. Models are centred and scaled to fit automatically; inside-out (clockwise) winding is detected and repaired; missing normals are generated. Textures, materials and groups are ignored.
+OBJ support: `v` (with optional `r g b` vertex colours), `vn`, and `f` in every index form (`v`, `v/vt`, `v//vn`, `v/vt/vn`) with negative indices. Polygons are fan-triangulated, so they must be convex. Models are centred and scaled to fit automatically; inside-out (clockwise) winding is detected and repaired; missing normals are generated. `vt` texture coordinates are kept (see `--texture`). Materials and groups are ignored. Models are viewed right-handed from +z: `+x` is right, `+y` is up and `+z` points at you, so a model that faces +z shows its front at start.
 
-Samples in `models/`: `sphere.obj` (with normals), `torus.obj` (quads, no normals), `pyramid.obj` (vertex colours, negative indices, clockwise winding).
+Samples in `models/`: `sphere.obj` (normals and texture coordinates), `torus.obj` (quads, no normals), `pyramid.obj` (vertex colours, negative indices, clockwise winding).
 
 ## How it works
 
@@ -90,7 +93,7 @@ cargo fmt
 - [x] Smooth per-vertex shading
 - [x] Half-block characters and color
 - [x] PNG to ASCII
-- [ ] Texture-mapping PNGs onto models (`vt` coordinates)
+- [x] Texture-mapping PNGs onto models (`vt` coordinates)
 - [ ] `.mtl` materials
 - [x] 256- and 16-colour fallback (`--colors`)
 

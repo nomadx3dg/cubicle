@@ -12,6 +12,8 @@ This document explains what changed in v0.2.0, how the code is organised, the de
 | Smooth per-vertex shading | done | `src/mesh.rs` (`smooth_normals`), `src/raster.rs` |
 | Half-block characters and color | done | `src/display.rs` (`Mode`, `Palette`, `Canvas::encode`) |
 | PNG to ASCII | done (as an image viewer, see §6) | `src/image.rs`, `src/app.rs` |
+| Texture mapping (`--texture`) | done | `src/obj.rs` (`vt`), `src/raster.rs` (`render_textured`), `Image::sample` |
+| 256/16-colour fallback, pty tests | done by a previous session | `display.rs`, `tests/pty.rs` |
 
 Also added: a CLI (`--once`, `--size`, `--rot`, ...), a library/binary split, 53 tests, sample assets, CI config, and a refreshed README.
 
@@ -53,7 +55,7 @@ Because `base` is per-pixel rather than per-triangle, texture mapping needs no c
 ## 3. Behaviour you should know about
 
 **Geometry and shading**
-- Camera sits at `(0, 0, -cam)` looking toward +z; the model rotates (`rot_y` then `rot_x`), the camera does not. The light is a fixed point light in that same space, near the camera, up and to the right. Lighting formula is unchanged from v0.1.0: `0.08 + 1.9·diffuse·attenuation`, clamped to 1.
+- Camera sits at `(0, 0, +cam)` looking toward -z with x right and y up (right-handed, so models and textures are **not** mirrored: a counter-clockwise triangle faces the viewer). The model rotates, the camera does not. Rotation angles are applied negated (`rot_y(-ay).rot_x(-ax)`) so that every control, `--rot` value and the auto-spin look exactly as they did in v0.1.0 (which viewed the world from -z, i.e. mirrored; the symmetric cube hid this). `tests/` include `view_is_not_mirrored` to guard it. Do not "simplify" the negations away. The light is a fixed point light in that same space, near the camera, up and to the right. Lighting formula is unchanged from v0.1.0: `0.08 + 1.9·diffuse·attenuation`, clamped to 1.
 - Terminal cells are ~2× taller than wide. In ASCII mode the horizontal projection scale is doubled; in block mode pixels are square, so `render` works in "cell units" and converts (`focal_cells`, `focal`, `x_scale`). A test (`blocks_mode_keeps_the_same_physical_size`) guards this.
 - Smooth normals: positions are welded by quantising to 1e-4 (after normalisation), then each corner averages the area-weighted normals of faces at that position that are within the crease angle (default 60°) of its own face. Consequences: the cube stays crisp, curved meshes go smooth, and `--crease` tunes it. File-supplied `vn` normals take precedence when all three corners have one.
 - `--flat` / `s` ignores corner normals and uses the geometric face normal (the v0.1.0 look).
@@ -64,6 +66,13 @@ Because `base` is per-pixel rather than per-triangle, texture mapping needs no c
 - Three colour depths (`display::ColorDepth`): truecolor (`ESC[38;2;r;g;bm` / `48;2`), xterm 256 (`38;5;n`), and 16 basic colours (`30-37`/`90-97`, `40-47`/`100-107`). `--colors auto` (the default) resolves via `ColorDepth::detect()`: `COLORTERM=truecolor|24bit`, `WT_SESSION`, known `TERM_PROGRAM`s and `TERM` names (kitty, alacritty, ...) give truecolor; `TERM` containing `256color` gives 256; any other `TERM` gives 16; no `TERM` at all (pipes, CI) keeps truecolor. `Config::default()` is always truecolor so unit tests don't depend on the environment; only `parse_args` calls `detect()`. `RowWriter` quantises through `Paint`, so it emits a colour escape only when the *quantised* colour changes (low depths shrink the stream a lot) and resets at row end. `rgb_to_16` is hue-based rather than nearest-colour, because nearest-colour sends every dim tint to grey. Mono ASCII mode emits no escape codes at all.
 - `Palette::apply` tints by luma (Natural = untouched). Shadows are lifted in block mode (`0.22 + 0.78·lum^0.7`) because the original lighting is harsh and unlit faces went nearly black.
 - The default render mode is still plain ASCII to preserve the v0.1.0 look and maximum terminal compatibility.
+
+**Textures**
+- `Triangle.uv` / `RawTri.uv` hold per-corner `[u, v]` (`v` = 0 is the bottom edge, OBJ convention). `obj.rs` keeps `vt` when a face supplies all three corners. The built-in cube has UVs on every face, oriented so an image reads correctly on all six (test: `cube_texture_is_not_mirrored_on_any_face`).
+- `raster::render_textured(.., tex: Option<&Image>, ..)` interpolates UVs with the perspective-correct weights `a0..a2` and writes `Image::sample(u, v)` (bilinear, wrapping) to `canvas.base`; `lit` shading and palettes then apply as usual. `render` is the untextured wrapper. Triangles without UVs keep their own colour (so the torus is unchanged by `--texture`).
+- `ModelView` owns `texture: Option<Image>` and `tex_on` (key `t`, a no-op without a texture). `app::build_view` loads `--texture`. `--texture` with a PNG input is a usage error (exit 2).
+- Sampling uses the PNG's sRGB bytes as-is (no gamma conversion), consistent with the image viewer. There is no mip-mapping, so minified textures shimmer when spinning; with ~100 columns this is hard to see.
+- `examples/checker.png` has an asymmetric red "F" specifically so mirroring/rotation mistakes are obvious.
 
 **Input**
 - The bottom terminal row is the HUD, so the 3D area is `rows - 1` tall.
@@ -82,7 +91,7 @@ Because `base` is per-pixel rather than per-triangle, texture mapping needs no c
 ## 4. Testing
 
 ```sh
-cargo test                       # 55 unit + 12 end-to-end + 4 pty tests
+cargo test                       # 62 unit + 14 end-to-end + 5 pty tests
 cargo clippy --all-targets       # clean as of 1.75
 cargo fmt                        # rustfmt.toml: max_width = 110
 ```
@@ -104,21 +113,22 @@ cargo fmt                        # rustfmt.toml: max_width = 110
 
 These were judgement calls made without being able to ask. Confirm or overrule them:
 
-1. **"PNG to ASCII" means an image viewer** (`cubicle pic.png`), not texturing a model. Texturing is listed as the next roadmap item. If the author meant texture mapping, §7 describes the approach.
+1. **"PNG to ASCII" means an image viewer** (`cubicle pic.png`). Texture mapping was added as well (`--texture`), so both readings of the roadmap item are covered.
 2. **Default mode stays plain ASCII**, and colour/blocks are opt-in. Switching the default to blocks would look better on modern terminals but changes v0.1.0 behaviour.
 3. **Colour depth is auto-detected** from the environment (see §3). A truecolor terminal that sets neither `COLORTERM` nor a recognisable `TERM` (some tmux/ssh setups) will be treated as 256-colour; `--colors truecolor` overrides. The detection rules are a best guess and have not been tried on real Termux, macOS Terminal or Windows Terminal.
 4. **Version bumped to 0.2.0** and a `[lib]` target added. Revert the bump if the author prefers to version differently.
 5. **Not verified on real Termux hardware or Windows.** Verified on Linux with a pty. CI config for Linux/macOS/Windows is included but has never run.
 6. **The README's old character ramp text was stale** (`" .:-=+*#%@"`); the code's actual ramp is `" .,:;-=+*#%@"`. The README now matches the code.
-7. **Push status:** the work was committed locally; whether it reached GitHub is covered in the delivery notes outside this file. Note that pushing `.github/workflows/ci.yml` requires a token with the `workflow` scope.
+7. **Pushing:** agent sessions in this project have had no GitHub credentials, so the maintainer pushes (via a git bundle). Pushing `.github/workflows/ci.yml` requires a token with the `workflow` scope.
+8. **Handedness fix (behaviour change):** the original renderer viewed the world mirrored (camera at -z, x to the right). Asymmetric models and textures came out left-right reversed. The camera now sits at +z (right-handed) and angles are negated, so controls and the cube's appearance are byte-identical to before (verified by diffing `--once` output across rotations) while asymmetric content is now correct. If the author *wanted* the old mirrored convention, revert the three lines in `raster::render_textured` (eye, light, `z = cam - v.z`, rotation signs) and flip `u` on the cube.
 
 ## 7. Suggested next steps
 
 In rough priority order.
 
-1. **Texture mapping.** Parse `vt` into `RawTri`/`Triangle` as `uv: [[f32;2];3]`; carry it in `Prim`; in `Frame::fill` interpolate UVs with the *perspective-correct* weights already computed (`a0, a1, a2`, divide by their sum); sample an `Image` (add a `sample(u, v) -> [f32;3]` method with nearest/bilinear lookup) and write the result to `canvas.base[i]` instead of the triangle colour. `lit == true` then multiplies it by lighting, so no display changes are needed. Add `--texture FILE.png` and keep untextured behaviour as the default.
+1. ~~Texture mapping~~ — done (§3 *Textures*). Possible follow-ups: per-material textures via `.mtl` `map_Kd`, a `--texture-filter nearest` option, mip-mapping.
 2. ~~256-colour / 16-colour fallback and `COLORTERM` detection~~ — done (`ColorDepth`, `--colors`).
-3. **`.mtl` support** (`Kd` diffuse colours via `mtllib`/`usemtl`) feeding the existing per-triangle `color`.
+3. **`.mtl` support** (`Kd` diffuse colours and `map_Kd` textures via `mtllib`/`usemtl`) feeding the existing per-triangle `color` / texture. `map_Kd` would need a per-triangle texture index rather than the single global `--texture`.
 4. **Near-plane clipping** so that zooming inside a model clips instead of dropping triangles.
 5. **Concave polygon triangulation** (ear clipping) in `obj.rs`.
 6. **Performance** for very large meshes: precompute rotation once per frame per vertex rather than per triangle corner (each shared vertex is rotated up to ~6 times now), and add a bounding-box reject. Measured: an 80k-triangle sphere loads and renders one 120×40 block frame in ~80 ms total including process start, so this is not urgent.

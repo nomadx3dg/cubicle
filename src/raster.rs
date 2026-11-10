@@ -2,6 +2,7 @@
 //! per-pixel point lighting, optional smooth (interpolated) normals.
 
 use crate::display::Canvas;
+use crate::image::Image;
 use crate::mesh::Mesh;
 use crate::vec3::V3;
 
@@ -40,6 +41,7 @@ struct Prim {
     flat: V3,
     smooth: bool,
     color: [f32; 3],
+    uv: Option<[[f32; 2]; 3]>,
 }
 
 impl Frame {
@@ -50,7 +52,7 @@ impl Frame {
         }
     }
 
-    fn fill(&mut self, t: &Prim, light: V3) {
+    fn fill(&mut self, t: &Prim, light: V3, tex: Option<&Image>) {
         let (w, h) = (self.canvas.w, self.canvas.h);
         let edge = |a: (f32, f32), b: (f32, f32), c: (f32, f32)| {
             (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0)
@@ -118,21 +120,51 @@ impl Frame {
                 let diff = n.dot(to_light.normalize()).max(0.0);
                 let atten = 1.0 / (1.0 + 0.06 * d2);
                 self.canvas.lum[i] = (0.08 + 1.9 * diff * atten).min(1.0);
-                self.canvas.base[i] = t.color;
+                self.canvas.base[i] = match (tex, t.uv) {
+                    (Some(img), Some(uv)) => {
+                        // Perspective-correct texture coordinates.
+                        let s = a0 + a1 + a2;
+                        img.sample(
+                            (uv[0][0] * a0 + uv[1][0] * a1 + uv[2][0] * a2) / s,
+                            (uv[0][1] * a0 + uv[1][1] * a1 + uv[2][1] * a2) / s,
+                        )
+                    }
+                    _ => t.color,
+                };
             }
         }
     }
 }
 
 /// Draws the mesh into the frame. `ax`/`ay` rotate about the x/y axes and `cam`
-/// is the camera distance on the -z axis. The frame must be cleared (new).
+/// is the camera distance. The frame must be cleared (new).
+///
+/// The camera sits at `(0, 0, +cam)` looking toward -z with x to the right and y
+/// up, the usual right-handed setup, so models and textures are not mirrored
+/// (counter-clockwise triangles face the viewer). The angles are applied
+/// negated so that "positive angle" still turns the near face left/up, as the
+/// controls expect.
 pub fn render(mesh: &Mesh, ax: f32, ay: f32, cam: f32, opts: RenderOpts, frame: &mut Frame) {
+    render_textured(mesh, ax, ay, cam, opts, None, frame);
+}
+
+/// Like [`render`], but triangles that carry texture coordinates are coloured
+/// from `tex` (others keep their own colour).
+pub fn render_textured(
+    mesh: &Mesh,
+    ax: f32,
+    ay: f32,
+    cam: f32,
+    opts: RenderOpts,
+    tex: Option<&Image>,
+    frame: &mut Frame,
+) {
     if frame.canvas.w == 0 || frame.canvas.h == 0 {
         return;
     }
     let ppr = opts.pixels_per_row.max(1) as f32;
-    let eye = V3::new(0.0, 0.0, -cam);
-    let light = V3::new(2.5, 3.0, -cam + 0.5);
+    let eye = V3::new(0.0, 0.0, cam);
+    let light = V3::new(2.5, 3.0, cam - 0.5);
     // Terminal cells are ~2x taller than wide. Size in cell units so the model
     // fits tall and wide screens, then convert to pixels for the active mode.
     let rows = frame.canvas.h as f32 / ppr;
@@ -141,7 +173,7 @@ pub fn render(mesh: &Mesh, ax: f32, ay: f32, cam: f32, opts: RenderOpts, frame: 
     let focal = focal_cells * ppr; // vertical pixels per unit at z = 1
     let x_scale = focal_cells * 2.0; // horizontal pixels per unit at z = 1
     let (cx, cy) = (cols / 2.0, frame.canvas.h as f32 / 2.0);
-    let rot = |v: V3| v.rot_y(ay).rot_x(ax);
+    let rot = |v: V3| v.rot_y(-ay).rot_x(-ax);
 
     for tri in &mesh.tris {
         let t = [rot(tri.v[0]), rot(tri.v[1]), rot(tri.v[2])];
@@ -158,7 +190,7 @@ pub fn render(mesh: &Mesh, ax: f32, ay: f32, cam: f32, opts: RenderOpts, frame: 
         let mut inv_z = [0.0; 3];
         let mut behind = false;
         for (i, v) in t.iter().enumerate() {
-            let z = v.z + cam;
+            let z = cam - v.z;
             if z <= 0.1 {
                 behind = true;
                 break;
@@ -177,8 +209,9 @@ pub fn render(mesh: &Mesh, ax: f32, ay: f32, cam: f32, opts: RenderOpts, frame: 
             flat,
             smooth: opts.smooth,
             color: tri.color,
+            uv: tri.uv,
         };
-        frame.fill(&prim, light);
+        frame.fill(&prim, light, tex);
     }
 }
 
@@ -244,6 +277,63 @@ mod tests {
         let (a1, b1) = count(true);
         assert!(a0 == 0 || b0 == 0, "culling hides exactly one side");
         assert!(a1 > 0 && b1 > 0, "two-sided shows both");
+    }
+
+    #[test]
+    fn view_is_not_mirrored() {
+        // Right angle at the lower-left, counter-clockwise seen from the camera.
+        use crate::mesh::RawTri;
+        let raw = vec![RawTri::plain([
+            V3::new(-1.0, -1.0, 0.0),
+            V3::new(1.0, -1.0, 0.0),
+            V3::new(-1.0, 1.0, 0.0),
+        ])];
+        let mesh = Mesh::from_raw(raw, 60.0).unwrap();
+        let mut f = Frame::new(40, 20);
+        render(&mesh, 0.0, 0.0, 5.0, RenderOpts::default(), &mut f);
+        let at = |x: usize, y: usize| f.canvas.lum[y * 40 + x] >= 0.0;
+        assert!(at(14, 12), "lower-left should be filled");
+        assert!(!at(26, 7), "upper-right should be empty");
+    }
+
+    #[test]
+    fn texture_colours_cube_pixels() {
+        // A 1x1 pure-blue texture must turn every covered pixel blue.
+        let tex = Image {
+            w: 1,
+            h: 1,
+            rgb: vec![[0, 0, 255]],
+        };
+        let mut f = Frame::new(60, 24);
+        render_textured(
+            &Mesh::cube(),
+            0.4,
+            0.6,
+            5.0,
+            RenderOpts::default(),
+            Some(&tex),
+            &mut f,
+        );
+        let mut n = 0;
+        for (l, b) in f.canvas.lum.iter().zip(&f.canvas.base) {
+            if *l >= 0.0 {
+                assert_eq!(*b, [0.0, 0.0, 1.0]);
+                n += 1;
+            }
+        }
+        assert!(n > 100);
+    }
+
+    #[test]
+    fn cube_texture_is_not_mirrored_on_any_face() {
+        // Every cube triangle is counter-clockwise seen from outside, so an
+        // un-mirrored mapping (u right, v up) must also be counter-clockwise in uv space.
+        for t in &Mesh::cube().tris {
+            let uv = t.uv.expect("cube has uvs");
+            let area =
+                (uv[1][0] - uv[0][0]) * (uv[2][1] - uv[0][1]) - (uv[1][1] - uv[0][1]) * (uv[2][0] - uv[0][0]);
+            assert!(area > 1e-6, "mirrored or degenerate uv: {uv:?}");
+        }
     }
 
     #[test]

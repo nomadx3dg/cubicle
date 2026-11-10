@@ -3,7 +3,8 @@
 //! Supported: `v` (optionally with `r g b` vertex colours), `vn`, and `f` in all
 //! four index forms (`v`, `v/vt`, `v//vn`, `v/vt/vn`), including negative
 //! (relative) indices. Polygons are fan-triangulated, so they must be convex.
-//! Ignored: `vt`, groups, objects, smoothing groups, materials.
+//! Texture coordinates (`vt`) are kept when a face supplies all three corners.
+//! Ignored: groups, objects, smoothing groups, materials.
 
 use crate::mesh::{Mesh, RawTri};
 use crate::vec3::V3;
@@ -39,6 +40,7 @@ pub fn parse(src: &str) -> Result<Vec<RawTri>, String> {
     let mut pos: Vec<V3> = Vec::new();
     let mut vcol: Vec<Option<[f32; 3]>> = Vec::new();
     let mut nor: Vec<V3> = Vec::new();
+    let mut tex: Vec<[f32; 2]> = Vec::new();
     let mut out: Vec<RawTri> = Vec::new();
 
     for (i, line) in src.lines().enumerate() {
@@ -66,17 +68,29 @@ pub fn parse(src: &str) -> Result<Vec<RawTri>, String> {
                 }
                 nor.push(V3::new(f[0], f[1], f[2]));
             }
+            "vt" => {
+                let f = floats(it, ln)?;
+                if f.len() < 2 {
+                    return Err(format!("line {ln}: 'vt' needs at least 2 components"));
+                }
+                tex.push([f[0], f[1]]);
+            }
             "f" => {
-                let mut corners: Vec<(usize, Option<usize>)> = Vec::new();
+                // (position, texcoord, normal) indices
+                type Corner = (usize, Option<usize>, Option<usize>);
+                let mut corners: Vec<Corner> = Vec::new();
                 for tok in it {
                     let mut parts = tok.split('/');
                     let p = resolve(parts.next().unwrap_or(""), pos.len(), ln)?;
-                    let _vt = parts.next();
+                    let t = match parts.next() {
+                        Some(s) if !s.is_empty() => Some(resolve(s, tex.len(), ln)?),
+                        _ => None,
+                    };
                     let n = match parts.next() {
                         Some(s) if !s.is_empty() => Some(resolve(s, nor.len(), ln)?),
                         _ => None,
                     };
-                    corners.push((p, n));
+                    corners.push((p, t, n));
                 }
                 if corners.len() < 3 {
                     return Err(format!("line {ln}: face needs at least 3 vertices"));
@@ -84,7 +98,7 @@ pub fn parse(src: &str) -> Result<Vec<RawTri>, String> {
                 for k in 1..corners.len() - 1 {
                     let c = [corners[0], corners[k], corners[k + 1]];
                     let v = [pos[c[0].0], pos[c[1].0], pos[c[2].0]];
-                    let n = match (c[0].1, c[1].1, c[2].1) {
+                    let n = match (c[0].2, c[1].2, c[2].2) {
                         (Some(a), Some(b), Some(d)) => Some([nor[a], nor[b], nor[d]]),
                         _ => None,
                     };
@@ -96,7 +110,11 @@ pub fn parse(src: &str) -> Result<Vec<RawTri>, String> {
                         ],
                         _ => DEFAULT_COLOR,
                     };
-                    out.push(RawTri { v, n, color });
+                    let uv = match (c[0].1, c[1].1, c[2].1) {
+                        (Some(a), Some(b), Some(d)) => Some([tex[a], tex[b], tex[d]]),
+                        _ => None,
+                    };
+                    out.push(RawTri { v, n, color, uv });
                 }
             }
             _ => {}
@@ -139,6 +157,15 @@ mod tests {
         assert_eq!(t.len(), 3);
         assert!(t[0].n.is_some() && t[1].n.is_some());
         assert!(t[2].n.is_none());
+    }
+
+    #[test]
+    fn texture_coordinates_are_kept() {
+        let src = "v 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 0 1\nf 1/1 2/2 3/3\nf 1 2 3\n";
+        let t = parse(src).unwrap();
+        assert_eq!(t[0].uv, Some([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]));
+        assert_eq!(t[1].uv, None);
+        assert!(parse("v 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nf 1/2 2/1 3/1\n").is_err());
     }
 
     #[test]

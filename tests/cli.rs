@@ -161,3 +161,49 @@ fn images_honour_colour_depth() {
     ]);
     assert!(out.contains("48;5;") && !out.contains(";2;"));
 }
+
+fn blocks(extra: &[&str]) -> String {
+    let mut args = vec![
+        "--once",
+        "--size",
+        "50x16",
+        "-m",
+        "blocks",
+        "--colors",
+        "truecolor",
+        "--rot",
+        "20,30",
+    ];
+    args.extend_from_slice(extra);
+    stdout(&args)
+}
+
+#[test]
+fn texture_applies_to_models_with_uvs() {
+    // The built-in cube and models/sphere.obj carry texture coordinates.
+    let tex = "examples/checker.png";
+    assert_ne!(blocks(&[]), blocks(&["--texture", tex]));
+    assert_ne!(
+        blocks(&["models/sphere.obj"]),
+        blocks(&["models/sphere.obj", "--texture", tex])
+    );
+    // The torus has no `vt`, so a texture leaves it unchanged.
+    assert_eq!(
+        blocks(&["models/torus.obj"]),
+        blocks(&["models/torus.obj", "--texture", tex])
+    );
+}
+
+#[test]
+fn texture_errors_are_reported() {
+    let o = run(&["--once", "--texture", "nope.png"]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("cannot read"));
+
+    let o = run(&["--once", "--texture", "README.md"]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("PNG"));
+
+    let o = run(&["--texture", "examples/checker.png", "examples/gradient.png"]);
+    assert_eq!(o.status.code(), Some(2));
+}

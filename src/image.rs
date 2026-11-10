@@ -49,6 +49,26 @@ impl Image {
         Ok(Image { w, h, rgb })
     }
 
+    /// Bilinear sample at texture coordinates (`u` right, `v` up; both wrap).
+    /// Returns linear 0..1 RGB (the PNG's own values, no gamma conversion).
+    pub fn sample(&self, u: f32, v: f32) -> [f32; 3] {
+        let fx = u.rem_euclid(1.0) * self.w as f32 - 0.5;
+        let fy = (1.0 - v).rem_euclid(1.0) * self.h as f32 - 0.5;
+        let (x0, y0) = (fx.floor(), fy.floor());
+        let (tx, ty) = (fx - x0, fy - y0);
+        let wrap = |i: f32, n: usize| (i as i64).rem_euclid(n as i64) as usize;
+        let (xa, xb) = (wrap(x0, self.w), wrap(x0 + 1.0, self.w));
+        let (ya, yb) = (wrap(y0, self.h), wrap(y0 + 1.0, self.h));
+        let px = |x: usize, y: usize| self.rgb[y * self.w + x];
+        let mut out = [0.0; 3];
+        for (c, o) in out.iter_mut().enumerate() {
+            let top = px(xa, ya)[c] as f32 * (1.0 - tx) + px(xb, ya)[c] as f32 * tx;
+            let bot = px(xa, yb)[c] as f32 * (1.0 - tx) + px(xb, yb)[c] as f32 * tx;
+            *o = (top * (1.0 - ty) + bot * ty) / 255.0;
+        }
+        out
+    }
+
     /// Fits the image into a `cols` x `rows` terminal area (preserving aspect,
     /// centred) and box-filters it down. `pixels_per_row` is 1 for ASCII and
     /// 2 for half-blocks. `invert` flips glyph brightness for light terminals.
@@ -122,6 +142,23 @@ mod tests {
         // Half-transparent white over black is mid grey.
         let rgba = Image::decode(&make_png(1, 1, png::ColorType::Rgba, &[255, 255, 255, 128])[..]).unwrap();
         assert!((rgba.rgb[0][0] as i32 - 128).abs() <= 1);
+    }
+
+    #[test]
+    fn sampling_hits_pixel_centres_and_blends() {
+        // 2x2: top row red, green; bottom row blue, white. v = 1 is the top edge.
+        let img = Image {
+            w: 2,
+            h: 2,
+            rgb: vec![[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 255]],
+        };
+        assert_eq!(img.sample(0.25, 0.75), [1.0, 0.0, 0.0]);
+        assert_eq!(img.sample(0.75, 0.25), [1.0, 1.0, 1.0]);
+        let mid = img.sample(0.5, 0.75); // halfway between red and green
+        assert!((mid[0] - 0.5).abs() < 1e-5 && (mid[1] - 0.5).abs() < 1e-5);
+        // Coordinates wrap.
+        assert_eq!(img.sample(1.25, 1.75), img.sample(0.25, 0.75));
+        assert_eq!(img.sample(-0.75, -0.25), img.sample(0.25, 0.75));
     }
 
     #[test]
