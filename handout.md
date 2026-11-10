@@ -1,6 +1,6 @@
 # cubicle — handout for AI developers
 
-This document explains what changed in v0.2.0, how the code is organised, the decisions behind it, and where to go next. Read it before editing; it is meant to save you re-deriving things.
+This document explains what changed in v0.2.0 and v0.3.0 (menu, browser, GPU), how the code is organised, the decisions behind it, and where to go next. Read it before editing; it is meant to save you re-deriving things.
 
 ## 1. Where the project stands
 
@@ -14,8 +14,10 @@ This document explains what changed in v0.2.0, how the code is organised, the de
 | PNG to ASCII | done (as an image viewer, see §6) | `src/image.rs`, `src/app.rs` |
 | Texture mapping (`--texture`) | done | `src/obj.rs` (`vt`), `src/raster.rs` (`render_textured`), `Image::sample` |
 | 256/16-colour fallback, pty tests | done by a previous session | `display.rs`, `tests/pty.rs` |
+| Main menu, render settings, `.obj`/`.png` browser | done | `src/menu.rs`, `src/browser.rs`, `src/settings.rs`, `app::run_menu` |
+| CPU / GPU / CPU+GPU backends | done (GPU is an optional cargo feature) | `src/engine.rs`, `src/gpu.rs`, `src/gpu.wgsl` |
 
-Also added: a CLI (`--once`, `--size`, `--rot`, ...), a library/binary split, 53 tests, sample assets, CI config, and a refreshed README.
+Also added: a CLI (`--once`, `--size`, `--rot`, ...), a library/binary split, sample assets, CI config, and a refreshed README. See §9 for the menu and GPU work, which is the newest part.
 
 Toolchain: developed and tested with **Rust 1.75** (`rust-version = "1.75"`), `crossterm 0.27`, `png 0.17`. `Cargo.lock` is committed.
 
@@ -91,8 +93,9 @@ Because `base` is per-pixel rather than per-triangle, texture mapping needs no c
 ## 4. Testing
 
 ```sh
-cargo test                       # 62 unit + 14 end-to-end + 5 pty tests
-cargo clippy --all-targets       # clean as of 1.75
+cargo test                       # 91 unit + 16 end-to-end + 12 pty tests
+cargo test --features gpu        # + 5 GPU parity tests (they skip themselves when no adapter exists)
+cargo clippy --all-targets       # clean as of 1.75, also with --features gpu
 cargo fmt                        # rustfmt.toml: max_width = 110
 ```
 
@@ -116,11 +119,12 @@ These were judgement calls made without being able to ask. Confirm or overrule t
 1. **"PNG to ASCII" means an image viewer** (`cubicle pic.png`). Texture mapping was added as well (`--texture`), so both readings of the roadmap item are covered.
 2. **Default mode stays plain ASCII**, and colour/blocks are opt-in. Switching the default to blocks would look better on modern terminals but changes v0.1.0 behaviour.
 3. **Colour depth is auto-detected** from the environment (see §3). A truecolor terminal that sets neither `COLORTERM` nor a recognisable `TERM` (some tmux/ssh setups) will be treated as 256-colour; `--colors truecolor` overrides. The detection rules are a best guess and have not been tried on real Termux, macOS Terminal or Windows Terminal.
-4. **Version bumped to 0.2.0** and a `[lib]` target added. Revert the bump if the author prefers to version differently.
+4. **Versions bumped** (0.2.0, then 0.3.0 for the menu and GPU work) and a `[lib]` target added. Revert if the author prefers to version differently.
 5. **Not verified on real Termux hardware or Windows.** Verified on Linux with a pty. CI config for Linux/macOS/Windows is included but has never run.
 6. **The README's old character ramp text was stale** (`" .:-=+*#%@"`); the code's actual ramp is `" .,:;-=+*#%@"`. The README now matches the code.
 7. **Pushing:** agent sessions in this project have had no GitHub credentials, so the maintainer pushes (via a git bundle). Pushing `.github/workflows/ci.yml` requires a token with the `workflow` scope.
 8. **Handedness fix (behaviour change):** the original renderer viewed the world mirrored (camera at -z, x to the right). Asymmetric models and textures came out left-right reversed. The camera now sits at +z (right-handed) and angles are negated, so controls and the cube's appearance are byte-identical to before (verified by diffing `--once` output across rotations) while asymmetric content is now correct. If the author *wanted* the old mirrored convention, revert the three lines in `raster::render_textured` (eye, light, `z = cam - v.z`, rotation signs) and flip `u` on the cube.
+9. **Menu / backend decisions made without asking** (confirm or overrule): bare `cubicle` now opens the menu (use `--cube` for the old behaviour); "both" means a **split frame** (GPU top half, CPU bottom half) rather than, say, rendering twice and comparing or alternating frames; the GPU backend is an **optional cargo feature** rather than always compiled (a GPU stack would otherwise be mandatory for Termux users); the `.obj` browser is also reused for PNG images and textures; settings persist automatically on every change.
 
 ## 7. Suggested next steps
 
@@ -143,3 +147,44 @@ In rough priority order.
 - Terminal state is restored by `TermGuard::drop`. Keep all code between guard creation and exit panic-safe, or the user's terminal is left in raw mode.
 - `\x1b[?2026h/l` (synchronized update) and `\x1b[?7l` (no line wrap) are written raw; terminals that do not support 2026 simply ignore it.
 - `Mesh::cube()` goes through `from_raw`, so any change to normalisation (centre, radius, winding) also affects the cube. The test `cube_has_twelve_outward_triangles` will catch inversions.
+
+## 9. Main menu, settings, file browser and GPU backend
+
+### Menu architecture
+- `src/menu.rs` is a state machine (`Menu::on_key`, `on_mouse`, `draw`) returning an `Action` (`None`, `Quit`, `Launch(Cube | Model(path) | Image(path))`). It has no terminal I/O, so it is unit-tested directly. `app::run_menu` is the thin loop around it: it owns **one** `TermGuard` for the whole session and calls the same viewer loops (`run_model_loop`, `image_loop`) the non-menu path uses, so `q`/Esc in a viewer returns to the menu. After a viewer returns, the menu creates a fresh `Screen` to force a full redraw.
+- A failed launch (bad `.obj`, unreadable PNG/texture) comes back as `Err(String)` from `app::launch` and is shown on the menu's message line (red, cleared on the next key). It never exits the program.
+- Entry points (`main.rs`): bare `cubicle` -> menu with **saved** settings. `--menu [flags]` -> menu whose starting settings are the flags (the saved file is not read, but it is still written when settings change). Any other invocation (a FILE, `--cube`, `--once`, or flags without a FILE) behaves as before the menu existed. **Behaviour change:** bare `cubicle` used to spin the cube; use `--cube` for that. The pty tests use `--cube` accordingly.
+- Layout constants: list screens have 3 header rows and 2 footer rows (context line + key help); the browser has 2 header rows and 1 footer row. Taps are mapped with the same constants as drawing (`HEADER`, `browser::HEADER_ROWS`), so change them together. Every draw path clips to the terminal width/height (test: `drawing_always_fits_the_terminal`).
+- Settings screen rows are indexed (`ROW_TEXTURE = 7`, `ROW_BACK = 8`); `Menu::change`, `setting_line` and `setting_help` must stay in step when adding a row.
+
+### Settings (`src/settings.rs`)
+- `Settings` (backend, mode, palette, colour depth or auto, smooth, two_sided, auto_spin, texture, browse_dir) <-> `Config` via `from_config` / `apply`. A tiny lenient `key=value` format (`to_text` / `from_text`); unknown keys and bad values are ignored. Location: `$CUBICLE_CONFIG`, else `$XDG_CONFIG_HOME/cubicle/settings.conf`, else `~/.config/cubicle/settings.conf`. `save_to` / `load_from` take explicit paths so tests never touch the environment; `tests/pty.rs` gives each session its own `CUBICLE_CONFIG`.
+- Saved after **every** change. Save failures show a message, never abort.
+
+### File browser (`src/browser.rs`)
+- Pure state + drawing. Directories first, then files matching the extension filter (`obj` or `png`, case-insensitive), `..` first, dot-files hidden until `h`. Broken symlinks and unreadable directories are handled (an error line is shown). Selecting a file in the browser returns `Pick::Chosen(path)`.
+- Touch: first tap selects, tapping the selected row activates (so a stray tap cannot launch). Row 0 (the title bar) goes back.
+- The model browser starts in the remembered `browse_dir`, else `./models`, else `.`. The image and texture browsers start in `./examples` (texture: the previous texture's folder) when no folder is remembered.
+
+### Backends (`src/engine.rs`, `src/gpu.rs`, `src/gpu.wgsl`)
+- `settings::Backend` = `Cpu | Gpu | Both`. `Engine::render` is the single entry point used by `ModelView::frame_rows`. It returns an `Outcome` saying what actually drew the frame and, if the CPU stood in for a requested GPU, why. The HUD shows `cpu*` in that case.
+- **`Both` definition (a judgement call, see §6):** the canvas is split at `(rows / 2)` terminal rows. The GPU renders the top band on a scoped thread while the CPU renders the bottom band (`RenderOpts::y_range`, which clips the CPU fill to a row range while the projection still uses the whole canvas). The GPU band is then copied into the canvas. Both halves are exactly aligned (tests: `row_ranges_partition_a_frame_exactly`, `gpu_band_lines_up_with_cpu_band`).
+- **GPU is an optional cargo feature** (`--features gpu`) pulling in `wgpu 0.19`, `pollster`, `bytemuck`, `libc`. Without the feature `gpu.rs` compiles a stub whose every call returns "this build has no GPU support", so the rest of the code needs no `cfg`s. The default build and the 1.75 MSRV job are unaffected.
+- GPU pipeline: vertices are uploaded once per mesh (keyed by pointer + triangle count; re-uploaded when the mesh changes). The vertex shader applies the same rotation matrix, camera and light as the CPU (`raster::Projection` and `raster::light_position` are shared). It outputs clip coordinates with `w = z` so hardware attribute interpolation is perspective-correct, and a depth value that is linear in screen space. The fragment shader reproduces the lighting formula, smooth/flat normals, two-sided lighting (`front_facing`) and bilinear wrapping texture lookup, and writes `(colour, brightness)` to an `Rgba32Float` target (brightness `-1` = empty). The frame is read back and merged into the `Canvas`; everything after that (ASCII/colour/blocks encoding) is shared with the CPU.
+- Parity tests (`src/gpu.rs`, feature `gpu`) render the cube, the sphere and a textured cube through both paths and require coverage mismatch < 4 %, mean brightness error < 0.03 and mean colour error < 0.02. In practice the measured mismatch was 0.0000 on cube/sphere.
+- Robustness: GPU init is lazy and cached; failure is sticky (`Engine.gpu_error`), so a missing GPU costs one probe, not one per frame. A GPU error mid-run drops the GPU and redraws that frame on the CPU. Driver chatter on stderr during init (Mesa without `XDG_RUNTIME_DIR` prints a message) would corrupt the TUI, so on unix `gpu::quiet` redirects fd 2 to `/dev/null` around adapter/device creation.
+
+### Dependency pins (important when touching `Cargo.lock`)
+The newest `indexmap` / `hashbrown` need Rust's `edition2024`, which cargo 1.75 cannot parse. `Cargo.lock` therefore pins `indexmap 2.7.1` and `hashbrown 0.15.5`. If you run `cargo update` with a newer toolchain and then build on 1.75, expect `feature edition2024 is required`; fix with `cargo update -p indexmap --precise 2.7.1`. The optional GPU crates are in the lockfile even when the feature is off, but are not downloaded or compiled for the default build.
+
+### Testing the GPU here
+The development sandbox had no GPU, only Mesa's software Vulkan driver (llvmpipe / lavapipe; `apt install mesa-vulkan-drivers`). That is a real Vulkan adapter, so the parity tests exercise the whole pipeline, but nothing was measured on real GPU hardware and **no performance claim is made**. Readback every frame (`map_async` + `poll(Wait)`) is the likely cost on real devices; a double-buffered readback would hide latency (see next steps).
+
+### Known limitations / next steps for this area
+1. Not tested on a real GPU, on Termux/Android Vulkan, or on Windows/macOS. CI's `gpu-build` job only proves it compiles and that the tests skip cleanly.
+2. `Both` is a fixed 50/50 row split. Auto-balancing by measured frame times would use the GPU's strength when it is faster.
+3. Per-frame readback with a blocking `poll`. Consider two staging buffers and presenting the previous frame.
+4. Textures are uploaded without mip-maps; there is no `--texture-filter` option.
+5. The browser lists a single folder; there is no type-to-search and no preview of the highlighted model.
+6. The menu has no "about" or help screen; key help is a one-line footer.
+7. Settings are one global file; there are no per-model overrides.

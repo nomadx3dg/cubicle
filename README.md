@@ -1,13 +1,14 @@
 # cubicle
 
-Interactive 3D renderer for your terminal. A CPU rasteriser that draws lit, spinning 3D models as ASCII art, coloured ASCII, or half-block colour. It also turns PNGs into ASCII. Works with keyboard, mouse and touch (Termux).
+Interactive 3D renderer for your terminal. It draws lit, spinning 3D models as ASCII art, coloured ASCII, or half-block colour, and turns PNGs into ASCII. Works with keyboard, mouse and touch (Termux). Start it with no arguments for a main menu with render settings and a file browser.
 
-No GPU, no graphics libraries. Dependencies: `crossterm` (terminal I/O) and `png` (decoding).
+The default build is a pure CPU rasteriser with two dependencies, `crossterm` (terminal I/O) and `png` (decoding), and runs anywhere. An optional **GPU backend** (`--features gpu`) renders on the GPU via `wgpu`, or on the CPU and GPU together.
 
 ## Run
 
 ```sh
-cargo run --release                         # the built-in cube
+cargo run --release                         # the main menu (saved settings)
+cargo run --release -- --cube               # straight to the built-in cube
 cargo run --release -- models/torus.obj     # any Wavefront .obj
 cargo run --release -- -m blocks -p amber models/sphere.obj
 cargo run --release -- examples/gradient.png
@@ -23,15 +24,64 @@ cd cubicle
 cargo run --release -- -m blocks
 ```
 
+## Main menu
+
+Running `cubicle` with no arguments opens the menu (`--menu` opens it with your command-line flags as the starting settings):
+
+| Item | What it does |
+| --- | --- |
+| Spin the cube | The built-in demo cube |
+| Browse models (.obj)… | File browser: pick a model and view it. Remembers the last folder |
+| View an image (.png)… | The same browser, filtered to PNGs |
+| Render settings… | Backend, render mode, palette, colours, shading, faces, auto-spin, texture |
+| Quit | |
+
+In a viewer, `q` / Esc returns to the menu. A model that fails to load shows its error in the menu instead of closing the program.
+
+**Render settings** are saved after every change to `~/.config/cubicle/settings.conf` (or `$XDG_CONFIG_HOME/cubicle/`, or `$CUBICLE_CONFIG`), a plain `key=value` file you can edit by hand.
+
+| Setting | Options |
+| --- | --- |
+| Backend | `cpu`, `gpu`, `cpu+gpu` (see below) |
+| Render mode | `ascii`, `color`, `blocks` |
+| Palette | `natural`, `green`, `amber`, `ice` |
+| Colours | `auto`, `truecolor`, `256`, `16` |
+| Shading | `smooth`, `flat` |
+| Faces | `culled`, `two-sided` |
+| Auto-spin | on / off |
+| Texture | none, or a PNG chosen with the browser (`x` removes it) |
+
+**Menu controls:** ↑/↓ (or `j`/`k`) move, Enter or → selects, ← / → change a setting, `1`-`5` jump to a main-menu item, Esc / `q` go back. **Touch:** tap an item to select it; in settings the left third of a row steps back and the rest steps forward. In the file browser, the first tap selects and tapping the selected entry opens it (so a stray tap never launches a file); tap the title bar to go back; swipe to scroll. In the browser: Enter opens, Backspace goes up, `h` shows hidden files.
+
+## Render backends
+
+| Backend | Who draws the frame |
+| --- | --- |
+| `cpu` | The software rasteriser (default; works everywhere). |
+| `gpu` | A `wgpu` render pipeline on the GPU; the finished frame is read back and encoded to text. |
+| `cpu+gpu` | Both at once: the **GPU draws the top half of the frame while the CPU draws the bottom half**, in parallel, and the halves are joined. |
+
+Choose it in the menu, with `--backend cpu|gpu|both`, or live in a viewer with `g` or the backend button in the bottom bar (`cpu*` means the GPU was requested but could not be used).
+
+The GPU backend is optional and off by default so that the default build stays small and works on devices with no GPU stack (Termux):
+
+```sh
+cargo run --release --features gpu -- --backend gpu models/sphere.obj
+```
+
+It needs a Vulkan, Metal or DirectX 12 driver. If the build has no `gpu` feature, or no adapter is found, or the GPU fails mid-run, cubicle falls back to the CPU and says why (in the settings page, the `cpu*` label, and on stderr for `--once`). CPU and GPU frames agree to within rounding: tests compare them pixel by pixel.
+
 ## Options
 
 | Option | Meaning |
 | --- | --- |
-| `FILE` | `.obj` model or `.png` image (none: built-in cube) |
+| `FILE` | `.obj` model or `.png` image (none: the main menu) |
 | `-m, --mode ascii\|color\|blocks` | Plain ASCII (default), coloured ASCII, or half-block colour |
 | `-p, --palette natural\|green\|amber\|ice` | Colour palette for `color` / `blocks` |
 | `--colors auto\|truecolor\|256\|16` | Colour depth to emit. `auto` (default) reads `COLORTERM` / `TERM` |
 | `--texture FILE.png` | Map a PNG onto the model using its `vt` coordinates (the built-in cube and `models/sphere.obj` have them) |
+| `--backend cpu\|gpu\|both` | Who draws models (see *Render backends*) |
+| `--menu` / `--cube` | Open the main menu / skip it and show the cube |
 | `--flat` | Start with flat shading instead of smooth |
 | `--two-sided` | Draw back faces too (open meshes, planes) |
 | `--crease <deg>` | Smooth-shading crease angle, default 60 |
@@ -50,7 +100,7 @@ cargo run --release -- -m blocks
 | Tap the left / right / top / bottom of the screen | Turn the model that way |
 | Tap the center | Auto-spin on / off |
 | Swipe up / down | Tilt the model |
-| Bottom bar `[ - ]` `[ auto ]` `[ mode ]` `[ + ]` | Zoom out, auto-spin, cycle render mode, zoom in |
+| Bottom bar `[ - ]` `[ auto ]` `[ mode ]` `[ backend ]` `[ + ]` | Zoom out, auto-spin, cycle render mode, cycle backend, zoom in |
 | Arrow keys | Turn the model |
 | `+` / `-` | Zoom |
 | Space | Auto-spin on / off |
@@ -58,6 +108,7 @@ cargo run --release -- -m blocks
 | `c` | Cycle palette |
 | `s` | Smooth / flat shading |
 | `b` | Two-sided / back-face culling |
+| `g` | Cycle backend: cpu, gpu, cpu+gpu |
 | `t` | Texture on / off (when `--texture` is given) |
 | `r` | Reset view |
 | Mouse drag | Rotate (desktop terminals) |
@@ -82,7 +133,8 @@ For contributors and AI agents, see [`handout.md`](handout.md).
 ## Development
 
 ```sh
-cargo test          # unit + end-to-end tests
+cargo test                    # unit + end-to-end + pty tests
+cargo test --features gpu     # also compares the GPU renderer to the CPU one (skips without an adapter)
 cargo clippy --all-targets
 cargo fmt
 ```
@@ -96,6 +148,8 @@ cargo fmt
 - [x] Texture-mapping PNGs onto models (`vt` coordinates)
 - [ ] `.mtl` materials
 - [x] 256- and 16-colour fallback (`--colors`)
+- [x] Main menu, render settings, `.obj` browser
+- [x] GPU and CPU+GPU render backends (optional `gpu` feature)
 
 ## License
 
