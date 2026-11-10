@@ -1,6 +1,6 @@
 [package]
 name = "cubicle"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.75"
 description = "Interactive 3D renderer for your terminal. Spin 3D models as ASCII art."
@@ -21,6 +21,19 @@ path = "src/main.rs"
 [dependencies]
 crossterm = "0.27"
 png = "0.17"
+
+# Optional GPU backend (`--features gpu`). Off by default so the default build
+# stays small and works on devices with no GPU stack (e.g. Termux).
+wgpu = { version = "0.19", optional = true, default-features = false, features = ["wgsl"] }
+pollster = { version = "0.3", optional = true }
+bytemuck = { version = "1", optional = true, features = ["derive"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = { version = "0.2", optional = true }
+
+[features]
+default = []
+gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck", "dep:libc"]
 
 [profile.release]
 opt-level = 3

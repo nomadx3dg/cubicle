@@ -2,6 +2,7 @@
 
 use crate::display::{ColorDepth, Mode, Palette};
 use crate::mesh::DEFAULT_CREASE_DEG;
+use crate::settings::Backend;
 use std::path::PathBuf;
 
 pub const USAGE: &str = "\
@@ -13,12 +14,16 @@ USAGE:
 FILE:
     model.obj      view a Wavefront OBJ model
     image.png      view a PNG as ASCII art
-    (none)         view the built-in spinning cube
+    (none)         open the main menu (use --cube for the built-in spinning cube)
 
 OPTIONS:
     -m, --mode <ascii|color|blocks>      render mode (default: ascii)
     -p, --palette <natural|green|amber|ice>
                                          colour palette for color/blocks (default: natural)
+        --backend <cpu|gpu|both>         who renders models: the CPU, the GPU (needs a --features gpu build),
+                                         or both (GPU draws the top half, CPU the bottom half). Default: cpu
+        --menu                           open the main menu (also what a bare `cubicle` does)
+        --cube                           go straight to the built-in cube, skipping the menu
         --colors <auto|truecolor|256|16>  colour depth to emit (default: auto, from COLORTERM/TERM)
         --texture <FILE.png>             texture-map a PNG onto the model (uses the model's vt coordinates;
                                          the built-in cube has them too)
@@ -34,8 +39,9 @@ OPTIONS:
     -V, --version                        print the version
 
 KEYS (interactive):
-    arrows turn   +/- zoom   space auto-spin   m mode   c palette
+    arrows turn   +/- zoom   space auto-spin   m mode   c palette   g backend (cpu/gpu/cpu+gpu)
     s smooth/flat   b two-sided   t texture on/off   i invert (images)   r reset view   q/Esc quit
+    (when started from the menu, q/Esc returns to the menu)
 ";
 
 #[derive(Clone, Debug, PartialEq)]
@@ -50,6 +56,10 @@ pub struct Config {
     pub input: Input,
     pub mode: Mode,
     pub palette: Palette,
+    /// Which processor draws 3D models.
+    pub backend: Backend,
+    /// Open the main menu instead of a viewer.
+    pub menu: bool,
     /// Colour depth for the colour modes. Resolved from the environment unless `--colors` is given.
     pub depth: ColorDepth,
     /// PNG to map onto the model, if any.
@@ -71,6 +81,8 @@ impl Default for Config {
             input: Input::Cube,
             mode: Mode::Ascii,
             palette: Palette::Natural,
+            backend: Backend::Cpu,
+            menu: false,
             depth: ColorDepth::TrueColor,
             texture: None,
             smooth: true,
@@ -143,6 +155,13 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, Str
                         })?)
                     };
             }
+            "--backend" => {
+                let v = take(&mut it)?;
+                cfg.backend =
+                    Backend::parse(&v).ok_or_else(|| format!("unknown backend '{v}' (cpu, gpu, both)"))?;
+            }
+            "--menu" => cfg.menu = true,
+            "--cube" => {}
             "--texture" => cfg.texture = Some(take(&mut it)?.into()),
             "--flat" => cfg.smooth = false,
             "--two-sided" => cfg.two_sided = true,
@@ -279,6 +298,18 @@ mod tests {
             .unwrap_err()
             .contains("unknown colour depth"));
         assert!(parse(&["--colors"]).unwrap_err().contains("needs a value"));
+    }
+
+    #[test]
+    fn backend_and_menu_options() {
+        assert_eq!(cfg(&[]).backend, Backend::Cpu);
+        assert_eq!(cfg(&["--backend", "gpu"]).backend, Backend::Gpu);
+        assert_eq!(cfg(&["--backend=both"]).backend, Backend::Both);
+        assert!(parse(&["--backend", "tpu"])
+            .unwrap_err()
+            .contains("unknown backend"));
+        assert!(cfg(&["--menu"]).menu);
+        assert!(!cfg(&["--cube"]).menu);
     }
 
     #[test]

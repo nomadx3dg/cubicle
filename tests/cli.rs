@@ -207,3 +207,47 @@ fn texture_errors_are_reported() {
     let o = run(&["--texture", "examples/checker.png", "examples/gradient.png"]);
     assert_eq!(o.status.code(), Some(2));
 }
+
+#[test]
+fn backend_flag_always_produces_the_picture() {
+    let cpu = stdout(&["--once", "--size", "50x16", "--rot", "20,30", "--backend", "cpu"]);
+    for backend in ["gpu", "both"] {
+        let o = run(&[
+            "--once",
+            "--size",
+            "50x16",
+            "--rot",
+            "20,30",
+            "--backend",
+            backend,
+        ]);
+        assert!(
+            o.status.success(),
+            "{backend}: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+        let out = String::from_utf8(o.stdout).unwrap();
+        let err = String::from_utf8_lossy(&o.stderr);
+        assert_eq!(out.lines().count(), 16);
+        assert!(ink(&out) > 50);
+        if err.contains("GPU was not used") {
+            // No usable GPU (or a build without the feature): identical to the CPU frame.
+            assert_eq!(out, cpu, "{backend}");
+        } else {
+            // A real GPU drew (part of) it: same shape, a few edge glyphs may differ.
+            assert!(cfg!(feature = "gpu"), "only a gpu build can use the GPU");
+            let differing = out.chars().zip(cpu.chars()).filter(|(a, b)| a != b).count();
+            assert!(
+                differing * 20 < out.len(),
+                "{backend}: {differing} differing glyphs"
+            );
+        }
+    }
+}
+
+#[test]
+fn unknown_backend_is_a_usage_error() {
+    let o = run(&["--backend", "quantum"]);
+    assert_eq!(o.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("unknown backend"));
+}

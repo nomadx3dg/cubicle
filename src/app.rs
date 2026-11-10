@@ -2,10 +2,13 @@
 
 use crate::cli::{Config, Input};
 use crate::display::{hud, hud_hit, ColorDepth, Mode, Palette};
+use crate::engine::Engine;
 use crate::image::Image;
+use crate::menu::{Action, Launch, Menu};
 use crate::mesh::Mesh;
 use crate::obj;
-use crate::raster::{render_textured, Frame, RenderOpts};
+use crate::raster::{Frame, RenderOpts};
+use crate::settings::{Backend, Settings};
 use crossterm::{
     cursor,
     event::{
@@ -113,6 +116,11 @@ pub struct ModelView {
     /// Texture for models with `vt` coordinates, and whether it is shown.
     pub texture: Option<Image>,
     pub tex_on: bool,
+    /// Requested backend (cycled with `g` or the HUD button).
+    pub backend: Backend,
+    /// Why the requested backend could not be used for the last frame, if so.
+    pub note: Option<String>,
+    engine: Engine,
     drag_from: Option<(u16, u16)>,
     start: (f32, f32),
 }
@@ -140,6 +148,9 @@ impl ModelView {
             two_sided: cfg.two_sided,
             texture: None,
             tex_on: true,
+            backend: cfg.backend,
+            note: None,
+            engine: Engine::new(),
             drag_from: None,
             start: (ax, ay),
         }
@@ -166,6 +177,7 @@ impl ModelView {
             KeyCode::Char('c') => self.palette = self.palette.next(),
             KeyCode::Char('s') => self.smooth = !self.smooth,
             KeyCode::Char('b') => self.two_sided = !self.two_sided,
+            KeyCode::Char('g') => self.backend = self.backend.next(),
             KeyCode::Char('t') if self.texture.is_some() => self.tex_on = !self.tex_on,
             KeyCode::Char('r') => {
                 self.tax = self.start.0;
@@ -177,7 +189,7 @@ impl ModelView {
         Flow::Continue
     }
 
-    pub fn hud_labels(&self) -> [&'static str; 4] {
+    pub fn hud_labels(&self) -> [&'static str; 5] {
         [
             "[ - ]",
             if self.auto { "auto: on" } else { "auto: off" },
@@ -185,6 +197,13 @@ impl ModelView {
                 Mode::Ascii => "mode: ascii",
                 Mode::AsciiColor => "mode: color",
                 Mode::Blocks => "mode: blocks",
+            },
+            // A trailing * means the GPU was requested but the CPU drew the frame.
+            match (self.backend, self.note.is_some()) {
+                (Backend::Cpu, _) => "cpu",
+                (_, true) => "cpu*",
+                (Backend::Gpu, false) => "gpu",
+                (Backend::Both, false) => "cpu+gpu",
             },
             "[ + ]",
         ]
@@ -197,11 +216,12 @@ impl ModelView {
         match kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 if row + 1 >= th {
-                    // Bottom bar: [ - ] [ auto ] [ mode ] [ + ]
-                    match hud_hit(col as usize, tw as usize, 4) {
+                    // Bottom bar: [ - ] [ auto ] [ mode ] [ backend ] [ + ]
+                    match hud_hit(col as usize, tw as usize, 5) {
                         0 => self.zoom_out(0.6),
                         1 => self.auto = !self.auto,
                         2 => self.mode = self.mode.next(),
+                        3 => self.backend = self.backend.next(),
                         _ => self.zoom_in(0.6),
                     }
                     self.drag_from = None;
@@ -266,6 +286,7 @@ impl ModelView {
 
     fn opts(&self) -> RenderOpts {
         RenderOpts {
+            y_range: None,
             smooth: self.smooth,
             two_sided: self.two_sided,
             pixels_per_row: self.mode.pixels_per_row(),
@@ -273,11 +294,20 @@ impl ModelView {
     }
 
     /// Renders the 3D area (`rows` terminal rows tall) to encoded text rows.
-    pub fn frame_rows(&self, mesh: &Mesh, cols: usize, rows: usize) -> Vec<String> {
+    pub fn frame_rows(&mut self, mesh: &Mesh, cols: usize, rows: usize) -> Vec<String> {
         let ppr = self.mode.pixels_per_row();
         let mut frame = Frame::new(cols, rows * ppr);
+        let opts = self.opts();
         let tex = if self.tex_on { self.texture.as_ref() } else { None };
-        render_textured(mesh, self.ax, self.ay, self.cam, self.opts(), tex, &mut frame);
+        let out = self.engine.render(
+            self.backend,
+            mesh,
+            tex,
+            (self.ax, self.ay, self.cam),
+            opts,
+            &mut frame,
+        );
+        self.note = out.fallback_reason;
         frame.canvas.encode_with(self.mode, self.palette, self.depth)
     }
 }
@@ -298,9 +328,14 @@ fn build_view(cfg: &Config) -> Result<ModelView, String> {
     Ok(view)
 }
 
+/// Loads the model and texture. Done before the terminal UI starts, so errors
+/// print normally (or show in the menu) instead of flashing past.
+fn prepare_model(cfg: &Config) -> Result<(Mesh, ModelView), String> {
+    Ok((load_mesh(cfg)?, build_view(cfg)?))
+}
+
 fn run_model(cfg: &Config) -> Result<(), String> {
-    let mesh = load_mesh(cfg)?;
-    let mut view = build_view(cfg)?;
+    let (mesh, mut view) = prepare_model(cfg)?;
     let _guard = TermGuard::new().map_err(|e| format!("cannot start terminal UI: {e}"))?;
     run_model_loop(&mesh, &mut view).map_err(|e| e.to_string())
 }
@@ -385,13 +420,17 @@ impl ImageView {
 }
 
 fn run_image(cfg: &Config, img: &Image) -> Result<(), String> {
+    let _guard = TermGuard::new().map_err(|e| format!("cannot start terminal UI: {e}"))?;
+    image_loop(cfg, img)
+}
+
+fn image_loop(cfg: &Config, img: &Image) -> Result<(), String> {
     let mut view = ImageView {
         mode: cfg.mode,
         palette: cfg.palette,
         depth: cfg.depth,
         invert: cfg.invert,
     };
-    let _guard = TermGuard::new().map_err(|e| format!("cannot start terminal UI: {e}"))?;
     (|| -> io::Result<()> {
         let mut screen = Screen::new();
         let mut dirty = true;
@@ -431,6 +470,78 @@ fn run_image(cfg: &Config, img: &Image) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
+// ---------------------------------------------------------------------- menu
+
+/// Builds the viewer configuration for a menu choice from the base flags plus
+/// the current settings.
+pub fn launch_config(base: &Config, settings: &Settings, launch: &Launch) -> Config {
+    let mut cfg = base.clone();
+    settings.apply(&mut cfg);
+    cfg.once = false;
+    cfg.menu = false;
+    cfg.input = match launch {
+        Launch::Cube => Input::Cube,
+        Launch::Model(p) => Input::Obj(p.clone()),
+        Launch::Image(p) => Input::Png(p.clone()),
+    };
+    cfg
+}
+
+/// Runs a viewer inside the menu's terminal session. Load errors come back as
+/// `Err` so the menu can show them instead of exiting.
+fn launch(base: &Config, settings: &Settings, what: &Launch) -> Result<(), String> {
+    let cfg = launch_config(base, settings, what);
+    match &cfg.input {
+        Input::Png(p) => {
+            let img = Image::load(p)?;
+            image_loop(&cfg, &img)
+        }
+        _ => {
+            let (mesh, mut view) = prepare_model(&cfg)?;
+            run_model_loop(&mesh, &mut view).map_err(|e| e.to_string())
+        }
+    }
+}
+
+/// The main menu. `saved` loads the persisted settings; otherwise the settings
+/// come from the command-line flags in `cfg`.
+pub fn run_menu(cfg: &Config, saved: bool) -> Result<(), String> {
+    let settings = if saved {
+        Settings::load()
+    } else {
+        Settings::from_config(cfg)
+    };
+    let mut menu = Menu::new(settings, Settings::config_path());
+    let _guard = TermGuard::new().map_err(|e| format!("cannot start terminal UI: {e}"))?;
+    let mut screen = Screen::new();
+    (|| -> io::Result<()> {
+        loop {
+            let (tw, th) = terminal::size()?;
+            screen.draw((tw, th), menu.draw(tw as usize, th as usize))?;
+            if !event::poll(Duration::from_millis(250))? {
+                continue;
+            }
+            let action = match event::read()? {
+                Event::Key(k) if k.kind == KeyEventKind::Press => menu.on_key(k.code),
+                Event::Mouse(m) => menu.on_mouse(m.kind, m.column, m.row, tw, th),
+                _ => Action::None,
+            };
+            match action {
+                Action::None => {}
+                Action::Quit => return Ok(()),
+                Action::Launch(what) => {
+                    if let Err(e) = launch(cfg, &menu.settings, &what) {
+                        menu.show_message(e);
+                    }
+                    // The viewer drew over the screen: force a full redraw.
+                    screen = Screen::new();
+                }
+            }
+        }
+    })()
+    .map_err(|e| e.to_string())
+}
+
 // ------------------------------------------------------------------ one-shot
 
 /// Terminal size, falling back to 80x24 when stdout is not a terminal.
@@ -442,7 +553,13 @@ fn default_size() -> (usize, usize) {
 
 /// Renders a single frame (no HUD) as text. Used by `--once` and by tests.
 pub fn render_once(cfg: &Config) -> Result<String, String> {
+    render_once_noted(cfg).map(|(text, _)| text)
+}
+
+/// Like [`render_once`], plus a note when the requested GPU backend could not be used.
+pub fn render_once_noted(cfg: &Config) -> Result<(String, Option<String>), String> {
     let (w, h) = cfg.size.unwrap_or_else(default_size);
+    let mut note = None;
     let rows = match &cfg.input {
         Input::Png(p) => {
             let img = Image::load(p)?;
@@ -450,19 +567,24 @@ pub fn render_once(cfg: &Config) -> Result<String, String> {
                 .encode_with(cfg.mode, cfg.palette, cfg.depth)
         }
         _ => {
-            let mesh = load_mesh(cfg)?;
-            build_view(cfg)?.frame_rows(&mesh, w, h)
+            let (mesh, mut view) = prepare_model(cfg)?;
+            let rows = view.frame_rows(&mesh, w, h);
+            note = view.note.take();
+            rows
         }
     };
     let mut s = rows.join("\n");
     s.push('\n');
-    Ok(s)
+    Ok((s, note))
 }
 
 /// Entry point used by `main`.
 pub fn run(cfg: &Config) -> Result<(), String> {
     if cfg.once {
-        let text = render_once(cfg)?;
+        let (text, note) = render_once_noted(cfg)?;
+        if let Some(n) = note {
+            eprintln!("cubicle: note: the GPU was not used ({n}); drew with the CPU");
+        }
         return io::stdout().write_all(text.as_bytes()).map_err(|e| e.to_string());
     }
     match &cfg.input {
@@ -524,14 +646,16 @@ mod tests {
     #[test]
     fn touch_zones_on_an_80x24_terminal() {
         let down = MouseEventKind::Down(MouseButton::Left);
-        // Bottom bar, quarters: zoom out, auto, mode, zoom in.
+        // Bottom bar, fifths of 16 columns: zoom out, auto, mode, backend, zoom in.
         let mut v = view();
         v.on_mouse(down, 5, 23, 80, 24);
         assert!(v.cam > CAM_START);
-        v.on_mouse(down, 30, 23, 80, 24);
+        v.on_mouse(down, 20, 23, 80, 24);
         assert!(!v.auto);
-        v.on_mouse(down, 50, 23, 80, 24);
+        v.on_mouse(down, 40, 23, 80, 24);
         assert_eq!(v.mode, Mode::AsciiColor);
+        v.on_mouse(down, 55, 23, 80, 24);
+        assert_eq!(v.backend, Backend::Gpu);
         v.on_mouse(down, 75, 23, 80, 24);
         assert_eq!(v.cam, CAM_START);
         // Centre toggles auto; right edge turns the cube.

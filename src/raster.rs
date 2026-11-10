@@ -14,11 +14,15 @@ pub struct RenderOpts {
     pub two_sided: bool,
     /// Canvas pixels per terminal row: 1 for ASCII, 2 for half-blocks.
     pub pixels_per_row: usize,
+    /// Only draw canvas rows `y0..y1` (the projection still uses the whole canvas).
+    /// Used to share a frame between the CPU and the GPU.
+    pub y_range: Option<(usize, usize)>,
 }
 
 impl Default for RenderOpts {
     fn default() -> Self {
         RenderOpts {
+            y_range: None,
             smooth: true,
             two_sided: false,
             pixels_per_row: 1,
@@ -42,6 +46,8 @@ struct Prim {
     smooth: bool,
     color: [f32; 3],
     uv: Option<[[f32; 2]; 3]>,
+    /// Inclusive-exclusive row limits for this fill.
+    rows: (usize, usize),
 }
 
 impl Frame {
@@ -69,13 +75,22 @@ impl Frame {
             .fold(f32::MIN, f32::max)
             .ceil()
             .min(w as f32 - 1.0);
-        let min_y = p.iter().map(|q| q.1).fold(f32::MAX, f32::min).floor().max(0.0);
+        let (row_lo, row_hi) = (t.rows.0.min(h), t.rows.1.min(h));
+        if row_hi <= row_lo {
+            return;
+        }
+        let min_y = p
+            .iter()
+            .map(|q| q.1)
+            .fold(f32::MAX, f32::min)
+            .floor()
+            .max(row_lo as f32);
         let max_y = p
             .iter()
             .map(|q| q.1)
             .fold(f32::MIN, f32::max)
             .ceil()
-            .min(h as f32 - 1.0);
+            .min(row_hi as f32 - 1.0);
         if max_x < min_x || max_y < min_y {
             return;
         }
@@ -136,6 +151,41 @@ impl Frame {
     }
 }
 
+/// Screen mapping shared by the CPU and GPU renderers so both frame a model identically.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Projection {
+    /// Vertical pixels per world unit at depth 1.
+    pub focal: f32,
+    /// Horizontal pixels per world unit at depth 1.
+    pub x_scale: f32,
+    /// Screen centre in canvas pixels.
+    pub cx: f32,
+    pub cy: f32,
+}
+
+impl Projection {
+    /// For a `w` x `h` pixel canvas with `pixels_per_row` pixels per terminal row.
+    pub fn new(w: usize, h: usize, pixels_per_row: usize, cam: f32) -> Projection {
+        let ppr = pixels_per_row.max(1) as f32;
+        // Terminal cells are ~2x taller than wide. Size in cell units so the model
+        // fits tall and wide screens, then convert to pixels for the active mode.
+        let rows = h as f32 / ppr;
+        let cols = w as f32;
+        let focal_cells = (rows * 1.1).min(cols * 0.65) * cam / 5.0;
+        Projection {
+            focal: focal_cells * ppr,
+            x_scale: focal_cells * 2.0,
+            cx: cols / 2.0,
+            cy: h as f32 / 2.0,
+        }
+    }
+}
+
+/// The point light: fixed in view space, up and to the right of the camera.
+pub fn light_position(cam: f32) -> V3 {
+    V3::new(2.5, 3.0, cam - 0.5)
+}
+
 /// Draws the mesh into the frame. `ax`/`ay` rotate about the x/y axes and `cam`
 /// is the camera distance. The frame must be cleared (new).
 ///
@@ -162,17 +212,14 @@ pub fn render_textured(
     if frame.canvas.w == 0 || frame.canvas.h == 0 {
         return;
     }
-    let ppr = opts.pixels_per_row.max(1) as f32;
     let eye = V3::new(0.0, 0.0, cam);
-    let light = V3::new(2.5, 3.0, cam - 0.5);
-    // Terminal cells are ~2x taller than wide. Size in cell units so the model
-    // fits tall and wide screens, then convert to pixels for the active mode.
-    let rows = frame.canvas.h as f32 / ppr;
-    let cols = frame.canvas.w as f32;
-    let focal_cells = (rows * 1.1).min(cols * 0.65) * cam / 5.0;
-    let focal = focal_cells * ppr; // vertical pixels per unit at z = 1
-    let x_scale = focal_cells * 2.0; // horizontal pixels per unit at z = 1
-    let (cx, cy) = (cols / 2.0, frame.canvas.h as f32 / 2.0);
+    let light = light_position(cam);
+    let Projection {
+        focal,
+        x_scale,
+        cx,
+        cy,
+    } = Projection::new(frame.canvas.w, frame.canvas.h, opts.pixels_per_row, cam);
     let rot = |v: V3| v.rot_y(-ay).rot_x(-ax);
 
     for tri in &mesh.tris {
@@ -210,6 +257,7 @@ pub fn render_textured(
             smooth: opts.smooth,
             color: tri.color,
             uv: tri.uv,
+            rows: opts.y_range.unwrap_or((0, frame.canvas.h)),
         };
         frame.fill(&prim, light, tex);
     }
@@ -277,6 +325,33 @@ mod tests {
         let (a1, b1) = count(true);
         assert!(a0 == 0 || b0 == 0, "culling hides exactly one side");
         assert!(a1 > 0 && b1 > 0, "two-sided shows both");
+    }
+
+    #[test]
+    fn row_ranges_partition_a_frame_exactly() {
+        // Rendering two bands must give the same pixels as rendering the whole frame.
+        let mesh = Mesh::cube();
+        let mut whole = Frame::new(60, 24);
+        render(&mesh, 0.4, 0.6, 5.0, RenderOpts::default(), &mut whole);
+        let mut parts = Frame::new(60, 24);
+        for r in [(0, 9), (9, 24)] {
+            let o = RenderOpts {
+                y_range: Some(r),
+                ..RenderOpts::default()
+            };
+            render(&mesh, 0.4, 0.6, 5.0, o, &mut parts);
+        }
+        assert_eq!(whole.canvas.lum, parts.canvas.lum);
+        // And a band leaves everything outside it empty.
+        let mut band = Frame::new(60, 24);
+        let o = RenderOpts {
+            y_range: Some((10, 12)),
+            ..RenderOpts::default()
+        };
+        render(&mesh, 0.4, 0.6, 5.0, o, &mut band);
+        for y in (0..10).chain(12..24) {
+            assert!(band.canvas.lum[y * 60..(y + 1) * 60].iter().all(|&l| l < 0.0));
+        }
     }
 
     #[test]
